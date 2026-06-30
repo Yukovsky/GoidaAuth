@@ -1,42 +1,94 @@
 <div align="center">
 
-# GoidaAuth
+<h1>🔐 GoidaAuth</h1>
 
-[![Latest Release](https://img.shields.io/github/v/release/Yukovsky/GoidaAuth?style=flat-square&label=latest&color=brightgreen)](https://github.com/Yukovsky/GoidaAuth/releases)
-[![Minecraft](https://img.shields.io/badge/Minecraft-1.21.1-blue?style=flat-square)](https://www.minecraft.net/)
-[![NeoForge](https://img.shields.io/badge/NeoForge-21.1.193+-orange?style=flat-square)](https://neoforged.net/)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)](LICENSE)
-[![Build](https://img.shields.io/github/actions/workflow/status/Yukovsky/GoidaAuth/build.yml?style=flat-square)](https://github.com/Yukovsky/GoidaAuth/actions)
+[![Latest Release](https://img.shields.io/github/v/release/Yukovsky/GoidaAuth?style=flat-square&label=release&color=2ea44f)](https://github.com/Yukovsky/GoidaAuth/releases)
+[![Minecraft](https://img.shields.io/badge/MC-1.21.1-4a90d9?style=flat-square&logo=minecraft&logoColor=white)](https://www.minecraft.net/)
+[![NeoForge](https://img.shields.io/badge/NeoForge-21.1.193+-e8870a?style=flat-square)](https://neoforged.net/)
+[![Java](https://img.shields.io/badge/Java-21-ed8b00?style=flat-square&logo=openjdk&logoColor=white)](https://adoptium.net/)
+[![License](https://img.shields.io/badge/License-MIT-8b949e?style=flat-square)](LICENSE)
+[![Build](https://img.shields.io/github/actions/workflow/status/Yukovsky/GoidaAuth/build.yml?style=flat-square&logo=github-actions&logoColor=white)](https://github.com/Yukovsky/GoidaAuth/actions)
 
-**Hybrid premium-aware authentication mod for offline-mode NeoForge servers.**
+**Hybrid authentication for offline-mode NeoForge 1.21.1 servers.**  
+Cracked players log in with a password. Premium players authenticate automatically via Mojang — zero extra setup.
 
-Handles both cracked (`/register` + `/login`) and licensed (automatic Mojang `hasJoined` verification) players on the same server.
-
-| Links | |
-|---|---|
-| Issues | [github.com/Yukovsky/GoidaAuth/issues](https://github.com/Yukovsky/GoidaAuth/issues) |
-| Releases | [github.com/Yukovsky/GoidaAuth/releases](https://github.com/Yukovsky/GoidaAuth/releases) |
-| Velocity companion | [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) |
+<table>
+<tr>
+<td align="center"><a href="https://github.com/Yukovsky/GoidaAuth/releases"><b>📦 Releases</b></a></td>
+<td align="center"><a href="https://github.com/Yukovsky/GoidaAuth/issues"><b>🐛 Issues</b></a></td>
+<td align="center"><a href="https://github.com/Yukovsky/GoidaAuthVelocity"><b>🔀 Velocity Companion</b></a></td>
+</tr>
+</table>
 
 </div>
 
 ---
 
+## How Authentication Works
+
+```
+Player connects
+│
+├─ Name exists in Mojang API?
+│   ├─ YES → mod initiates real encryption handshake → Mojang hasJoined check
+│   │             ├─ verified  → ✅ auto-login (no password needed)
+│   │             └─ failed    → ❌ kicked  (name is taken by a licensed account)
+│   │
+│   └─ NO  → player is cracked
+│                 ├─ already registered → /login <password>
+│                 └─ new player         → /register <password> <password>
+│
+└─ Session valid (same IP, not expired)? → ✅ auto-login without password prompt
+```
+
+<details>
+<summary><b>Behind a Velocity proxy with GoidaAuthVelocity</b></summary>
+
+```
+Player connects to Velocity proxy
+│
+├─ DB: premium = true  → forceOnlineMode  → Mojang handshake at proxy level
+│                                             → backend receives signed textures → ✅ auto-login
+├─ DB: premium = false → forceOfflineMode → backend → /login
+└─ New player          → forceOfflineMode → backend → /register
+                          └─ (Mojang check optional, see GoidaAuthVelocity config)
+```
+
+Premium verification happens **before** the player reaches your NeoForge server.  
+See [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) for setup.
+
+</details>
+
+---
+
+## Deployment Modes
+
+|  | **Standalone** | **Behind Velocity** |
+|---|---|---|
+| Premium check | Mod calls Mojang `hasJoined` directly | Proxy handles handshake; mod trusts signed `textures` |
+| Database | H2 embedded · zero-config · jarJar'd | Shared MySQL / MariaDB with GoidaAuthVelocity |
+| Extra components | None | [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) on the proxy |
+| Best for | Single-backend servers | Multi-backend proxy networks |
+
+Both modes are fully supported. Start standalone, migrate to proxy later by switching `database.mode` to `mysql`.
+
+---
+
 ## Features
 
-| Category | Description |
-|---|---|
-| Premium autologin | Initiates real Mojang encryption + `hasJoined` for premium usernames; impostor cracked clients with the same name are kicked |
-| Cracked auth | `/register <pass> <pass>` and `/login <pass>` via Brigadier with `/reg`, `/l` aliases |
-| Session autologin | Cracked players skip login on rejoin if IP matches and session is fresh (opt-in, off by default) |
-| Player lockdown | Freeze, blindness, slowness 255, god mode, chat/command/inventory block until authenticated |
-| Database | H2 embedded (zero-config, bundled via jarJar) or MySQL/MariaDB for shared proxy setups |
-| Password hashing | Argon2id with configurable iterations, memory, parallelism |
-| Twink protection | Block multi-accounting by IP or hardware fingerprint (requires companion client mod for HWID mode) |
-| Account transfer | `/transferaccount` — moves playerdata, stats, advancements between two accounts |
-| Server rules | `/rules` — displays configurable rule categories from `config/rules.json` |
-| LuckPerms compat | Login event defer to avoid NeoForge + LuckPerms race condition on join |
-| Fully configurable | All player-facing messages, timeouts, restrictions, and DB settings in one TOML file |
+<table>
+<tr><th>Category</th><th>Details</th></tr>
+<tr><td><b>Premium autologin</b></td><td>Real Mojang <code>hasJoined</code> verification — same flow as FastLogin. Impostors are kicked.</td></tr>
+<tr><td><b>Cracked registration</b></td><td><code>/register &lt;pass&gt; &lt;pass&gt;</code> and <code>/login &lt;pass&gt;</code> via Brigadier with <code>/reg</code>, <code>/l</code> aliases.</td></tr>
+<tr><td><b>Session autologin</b></td><td>Cracked players skip password on rejoin when IP matches and session is fresh (opt-in, off by default).</td></tr>
+<tr><td><b>Player lockdown</b></td><td>Freeze position, blindness, slowness 255, god mode, and full chat / command / inventory block until authenticated.</td></tr>
+<tr><td><b>Password hashing</b></td><td>Argon2id with configurable iterations, memory, and parallelism.</td></tr>
+<tr><td><b>Database</b></td><td>H2 embedded (default, bundled via jarJar) or MySQL / MariaDB for shared proxy setups.</td></tr>
+<tr><td><b>Twink protection</b></td><td>Block multi-accounting by IP or hardware fingerprint (HWID requires companion client mod).</td></tr>
+<tr><td><b>Account transfer</b></td><td><code>/transferaccount</code> — moves playerdata, stats, advancements, and sidecar files between accounts.</td></tr>
+<tr><td><b>Server rules</b></td><td><code>/rules</code> — displays configurable rule categories loaded from <code>config/rules.json</code>.</td></tr>
+<tr><td><b>LuckPerms compat</b></td><td>Login event defer to prevent the NeoForge + LuckPerms capability race condition on join.</td></tr>
+</table>
 
 ---
 
@@ -47,42 +99,29 @@ Handles both cracked (`/register` + `/login`) and licensed (automatic Mojang `ha
 | Minecraft | 1.21.1 |
 | NeoForge | 21.1.193 or later |
 | Java | 21 |
-| Side | Server only |
-| Server mode | `online-mode=false` in `server.properties` |
+| Side | **Server only** |
+| `server.properties` | `online-mode=false` |
 
-> **Note:** Online-mode is required to be `false`. If the server is in online-mode, NeoForge handles Mojang authentication natively and this mod is redundant.
+> If `online-mode=true`, NeoForge handles Mojang auth natively — this mod is not needed.
 
 ---
 
 ## Installation
 
-1. Download the latest jar from [Releases](https://github.com/Yukovsky/GoidaAuth/releases).
-2. Place it in the `mods/` folder of your NeoForge server.
-3. Start the server — config is created at `config/goidaauth-common.toml`.
-
----
-
-## Velocity Proxy Setup (optional)
-
-If the server runs behind a Velocity proxy, install the companion plugin [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) on the proxy and switch the mod's database to MySQL/MariaDB so both share the same `users` table.
-
-With this setup:
-- Velocity intercepts login at the proxy level and forces per-player online/offline mode based on the shared DB.
-- The mod trusts the NeoVelocity-forwarded signed `textures` property instead of calling Mojang itself.
-- Premium auth is more reliable because the handshake happens before the player reaches the backend.
-
-Without the companion plugin, the mod works fully standalone — it calls the Mojang `hasJoined` API directly, which is sufficient for single-backend setups.
+1. Download the latest `.jar` from [Releases](https://github.com/Yukovsky/GoidaAuth/releases).
+2. Drop it into the server's `mods/` directory.
+3. Start the server — config is generated at `config/goidaauth-common.toml`.
+4. *(Optional)* Set `online-mode=false` is already required; no other server-side changes needed.
 
 ---
 
 ## Configuration
 
-`config/goidaauth-common.toml` — created on first launch.
+`config/goidaauth-common.toml` — auto-generated on first launch.
 
 ```toml
 [database]
-  # h2 (embedded, default) | mysql | mariadb
-  mode = "h2"
+  mode = "h2"           # h2 | mysql | mariadb
   host = "127.0.0.1"
   port = 3306
   database = "goidaauth"
@@ -92,7 +131,7 @@ Without the companion plugin, the mod works fully standalone — it calls the Mo
 [premium]
   autologin = true
   mojang_timeout_ms = 5000
-  mojang_cache_ttl_min = 360
+  mojang_cache_ttl_min = 360   # cache "is name premium?" for 6 h
 
 [login]
   timeout_seconds = 60
@@ -103,7 +142,7 @@ Without the companion plugin, the mod works fully standalone — it calls the Mo
   allowed_commands = ["login", "l", "register", "reg", "help"]
 
 [sessions]
-  enabled = false
+  enabled = false           # session autologin for cracked players
   timeout_minutes = 10
   require_same_ip = true
 
@@ -121,35 +160,34 @@ Without the companion plugin, the mod works fully standalone — it calls the Mo
   teleport_to_spawn = false
 
 [twink_protection]
-  # disabled | ip | hardware
-  mode = "disabled"
+  mode = "disabled"         # disabled | ip | hardware
 
 [messages]
   login_prompt = "§eВведите §a/login <пароль> §eдля входа."
-  # ... all messages are configurable
+  # all 16 messages are configurable
 ```
 
 ---
 
 ## Commands
 
-| Command | Aliases | Description |
-|---|---|---|
-| `/login <password>` | `/l` | Authenticate with a registered password |
-| `/register <pass> <pass>` | `/reg` | Create an account |
-| `/premium` | — | Mark your account as premium (admin use) |
-| `/unpremium` | — | Revert to cracked mode |
-| `/transferaccount <from> <to>` | — | Move playerdata between two account names |
-| `/rules` | — | Show server rules |
+| Command | Alias | Who | Description |
+|---|---|---|---|
+| `/login <password>` | `/l` | Players | Authenticate with registered password |
+| `/register <pass> <pass>` | `/reg` | Players | Create a new account |
+| `/premium` | — | OP | Mark account as premium (next login will be forced online) |
+| `/unpremium` | — | OP | Revert to cracked mode |
+| `/transferaccount <from> <to>` | — | OP | Move playerdata between two account names |
+| `/rules` | — | Players | Show server rules |
 
-Permission nodes (PermissionAPI-compatible, optional):
+**Permission nodes** (PermissionAPI-compatible):
 
 | Node | Default |
 |---|---|
-| `goidaauth.command.login` | all |
-| `goidaauth.command.register` | all |
-| `goidaauth.command.premium` | OP |
-| `goidaauth.command.transferaccount` | OP |
+| `goidaauth.command.login` | everyone |
+| `goidaauth.command.register` | everyone |
+| `goidaauth.command.premium` | OP level 2 |
+| `goidaauth.command.transferaccount` | OP level 2 |
 
 ---
 
@@ -161,10 +199,16 @@ cd GoidaAuth
 ./gradlew build
 ```
 
-Output: `build/libs/goidaauth-<version>.jar`. Requires Java 21.
+Output: `build/libs/goidaauth-<version>.jar` · Requires Java 21.
+
+---
+
+## Velocity Proxy Setup
+
+Running behind Velocity? Install [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) on the proxy and switch `database.mode` to `mysql` so both share one `users` table. The proxy then handles per-player online/offline mode before connections reach the backend.
 
 ---
 
 ## License
 
-[MIT License](LICENSE)
+[MIT](LICENSE) © 2026 GoidaCraft
