@@ -1,0 +1,67 @@
+name: Bug Report
+description: Report a bug or unexpected behaviour
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting, search [existing issues](https://github.com/Yukovsky/GoidaAuth/issues).
+
+  - type: input
+    id: mod-version
+    attributes:
+      label: Mod Version
+      placeholder: "e.g. 1.7.6"
+    validations:
+      required: true
+
+  - type: input
+    id: env-version
+    attributes:
+      label: Minecraft / NeoForge Version
+      placeholder: "e.g. MC 1.21.1, NeoForge 21.1.193"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Server Setup
+      options:
+        - Standalone (no proxy)
+        - Behind Velocity proxy with GoidaAuthVelocity
+        - Behind Velocity proxy without GoidaAuthVelocity
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Crash Report
+      description: Paste the relevant section from `logs/latest.log`.
+      render: text
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other Mods
+      description: List any mods that may be relevant.

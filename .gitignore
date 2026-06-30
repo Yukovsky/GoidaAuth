@@ -1,0 +1,53 @@
+# gradle / build
+.gradle/
+build/
+out/
+classes/
+run/
+runs/
+src/generated/
+*.class
+
+# eclipse
+*.launch
+
+# idea
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# vscode
+.settings/
+.vscode/
+bin/
+.classpath
+.project
+
+# macos
+*.DS_Store
+
+# fabric
+remappedSrc/
+
+# logs
+*.log
+build_log.txt
+message*.txt
+
+# temp
+tmp/
+research/
+
+# AI / Claude Code
+.claude/
+memory/
+
+# server-specific data (not part of mod source)
+goida_rules.json
+
+# publishing guide (local only)
+PUBLISHING_RULES.md
+
+# Windows reserved device names
+nul
