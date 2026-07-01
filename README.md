@@ -6,7 +6,7 @@
 [![Minecraft](https://img.shields.io/badge/MC-1.21.1-4a90d9?style=flat-square&logo=minecraft&logoColor=white)](https://www.minecraft.net/)
 [![NeoForge](https://img.shields.io/badge/NeoForge-21.1.193+-e8870a?style=flat-square)](https://neoforged.net/)
 [![Java](https://img.shields.io/badge/Java-21-ed8b00?style=flat-square&logo=openjdk&logoColor=white)](https://adoptium.net/)
-[![License](https://img.shields.io/badge/License-MIT-8b949e?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache--2.0-8b949e?style=flat-square)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/Yukovsky/GoidaAuth/build.yml?style=flat-square&logo=github-actions&logoColor=white)](https://github.com/Yukovsky/GoidaAuth/actions)
 
 **Hybrid authentication for offline-mode NeoForge 1.21.1 servers.**  
@@ -211,4 +211,4 @@ Running behind Velocity? Install [GoidaAuthVelocity](https://github.com/Yukovsky
 
 ## License
 
-[MIT](LICENSE) © 2026 GoidaCraft
+[Apache License 2.0](LICENSE) © 2026 GoidaCraft
