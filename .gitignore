@@ -39,8 +39,6 @@ message*.txt
 tmp/
 research/
 
-# AI / Claude Code
-.claude/
 memory/
 
 # server-specific data (not part of mod source)
