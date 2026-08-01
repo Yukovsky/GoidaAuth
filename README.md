@@ -1,5 +1,7 @@
 <div align="center">
 
+**English** · [Русский](README.ru.md)
+
 <h1>🔐 GoidaAuth</h1>
 
 [![Latest Release](https://img.shields.io/github/v/release/Yukovsky/GoidaAuth?style=flat-square&label=release&color=2ea44f)](https://github.com/Yukovsky/GoidaAuth/releases)
@@ -169,6 +171,10 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
   login_prompt = "§eВведите §a/login <пароль> §eдля входа."
   # all 16 messages are configurable
 ```
+
+> [!NOTE]
+> Defaults apply to a **freshly generated** config only. NeoForge never rewrites an existing
+> `goidaauth-common.toml`, so after updating the mod any new settings have to be added there by hand.
 
 ---
 
