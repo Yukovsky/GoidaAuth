@@ -67,7 +67,6 @@ public final class DatabaseManager {
         if (mysql) {
             maybeImportFromH2(server);
         }
-        purgeOldAttempts(Config.ATTEMPT_RETENTION_DAYS.get());
         LOG.info("GoidaAuth DB ready (mode={})", mysql ? "mysql" : "h2");
     }
 
@@ -623,26 +622,62 @@ public final class DatabaseManager {
     // ------------------------------------------------------------------
 
     /**
-     * Records a failed attempt. Fire-and-forget: an audit write must never delay or fail a login,
-     * so errors are logged and swallowed.
+     * Records a failed attempt, then trims that account's history back to the configured size.
+     * Fire-and-forget: an audit write must never delay or fail a login, so errors are logged and
+     * swallowed.
      */
     public void recordFailedAttempt(String username, String ip, UUID uuid, String reason) {
+        String key = username.toLowerCase(Locale.ROOT);
         CompletableFuture.runAsync(() -> {
-            try (Connection c = dataSource.getConnection();
-                 PreparedStatement ps = c.prepareStatement(
-                    "INSERT INTO login_attempts (username, username_lower, ip, uuid, reason, attempted_at) " +
-                            "VALUES (?, ?, ?, ?, ?, ?)")) {
-                ps.setString(1, username);
-                ps.setString(2, username.toLowerCase(Locale.ROOT));
-                ps.setString(3, normalizeIp(ip));
-                ps.setString(4, uuid == null ? null : uuid.toString());
-                ps.setString(5, reason);
-                ps.setTimestamp(6, Timestamp.from(Instant.now()));
-                ps.executeUpdate();
+            try (Connection c = dataSource.getConnection()) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "INSERT INTO login_attempts (username, username_lower, ip, uuid, reason, attempted_at) " +
+                                "VALUES (?, ?, ?, ?, ?, ?)")) {
+                    ps.setString(1, username);
+                    ps.setString(2, key);
+                    ps.setString(3, normalizeIp(ip));
+                    ps.setString(4, uuid == null ? null : uuid.toString());
+                    ps.setString(5, reason);
+                    ps.setTimestamp(6, Timestamp.from(Instant.now()));
+                    ps.executeUpdate();
+                }
+                trimAttempts(c, key, Config.ATTEMPTS_KEPT_PER_ACCOUNT.get());
             } catch (SQLException e) {
                 LOG.warn("recordFailedAttempt failed for {}", username, e);
             }
         }, io);
+    }
+
+    /**
+     * Keeps only the newest {@code keep} attempts for one account, dropping the rest as new ones
+     * arrive — a rolling window rather than a scheduled purge, so an unplanned restart never
+     * decides what survives.
+     *
+     * <p>Done in two statements instead of a self-referencing DELETE, which MySQL rejects
+     * ("You can't specify target table for update in FROM clause"). Deleting strictly older than
+     * the cut-off means rows sharing that exact timestamp are kept, so the window can overshoot by
+     * a row or two — harmless, and it never deletes one of the newest {@code keep}.
+     */
+    private void trimAttempts(Connection c, String usernameLower, int keep) throws SQLException {
+        Timestamp cutoff;
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT attempted_at FROM login_attempts WHERE username_lower = ? " +
+                        "ORDER BY attempted_at DESC LIMIT 1 OFFSET ?")) {
+            ps.setString(1, usernameLower);
+            ps.setInt(2, keep - 1); // the keep-th newest row; anything strictly older goes
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return; // fewer than `keep` rows — nothing to trim
+                cutoff = rs.getTimestamp("attempted_at");
+            }
+        }
+        if (cutoff == null) return;
+        try (PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM login_attempts WHERE username_lower = ? AND attempted_at < ?")) {
+            ps.setString(1, usernameLower);
+            ps.setTimestamp(2, cutoff);
+            int rows = ps.executeUpdate();
+            if (rows > 0) LOG.debug("Trimmed {} old attempts for {}", rows, usernameLower);
+        }
     }
 
     /** Attempts aimed at one account — who tried to get in here. */
@@ -707,19 +742,6 @@ public final class DatabaseManager {
                 return 0;
             }
         }, io);
-    }
-
-    /** Drops attempts older than the retention window. Runs once at startup. */
-    private void purgeOldAttempts(int days) {
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(
-                "DELETE FROM login_attempts WHERE attempted_at < ?")) {
-            ps.setTimestamp(1, Timestamp.from(Instant.now().minus(java.time.Duration.ofDays(days))));
-            int rows = ps.executeUpdate();
-            if (rows > 0) LOG.info("Purged {} login attempts older than {} days", rows, days);
-        } catch (SQLException e) {
-            LOG.warn("purgeOldAttempts failed", e);
-        }
     }
 
     public CompletableFuture<Void> updatePassword(String username, String newHash) {

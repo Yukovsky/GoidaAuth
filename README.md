@@ -85,7 +85,7 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
 <tr><td><b>Rules gate</b></td><td><code>/rules</code> + <code>/acceptrules</code> — the same barrier for licensed and cracked players, asked once per account and persisted.</td></tr>
 <tr><td><b>Password hashing</b></td><td>BCrypt (cost 12). Legacy PBKDF2-SHA256 hashes are verified and transparently upgraded on next login.</td></tr>
 <tr><td><b>Brute-force limit</b></td><td>Per-IP block on repeated wrong passwords that survives reconnects; keyed by address, not account, so nobody can lock a player out of their own account.</td></tr>
-<tr><td><b>Attempt audit</b></td><td><code>/attempts</code> — failed logins recorded in their own table with account, address, UUID and reason, so staff can spot someone probing other people's accounts.</td></tr>
+<tr><td><b>Attempt audit</b></td><td><code>/attempts</code> — failed logins recorded in their own table with account, address, UUID and reason, so staff can spot someone probing other people's accounts. Kept as a rolling per-account window, never a scheduled purge.</td></tr>
 <tr><td><b>Database</b></td><td>H2 embedded (default, bundled via jarJar) or MySQL / MariaDB for shared proxy setups.</td></tr>
 <tr><td><b>Twink protection</b></td><td>Block multi-accounting by IP or hardware fingerprint (HWID requires companion client mod).</td></tr>
 <tr><td><b>Account transfer</b></td><td><code>/transferaccount</code> — moves playerdata, stats, advancements, and sidecar files between accounts.</td></tr>
@@ -143,7 +143,7 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
   max_attempts = 5              # wrong /login attempts per connection
   ip_block_after_attempts = 10  # wrong attempts per IP — survives reconnects
   ip_block_seconds = 600        # block duration, and how long a failure is remembered
-  attempt_retention_days = 30   # how long failed attempts are kept for /attempts
+  attempts_kept_per_account = 30 # rolling window of failed attempts kept per account
   min_password_length = 6
   max_password_length = 64
   register_confirm_required = true
@@ -174,42 +174,86 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
 
 ## Commands
 
-| Command | Alias | Who | Description |
-|---|---|---|---|
-| `/login <password>` | `/l` | Players | Authenticate with registered password |
-| `/register <pass> <pass>` | `/reg` | Players | Create a new account |
-| `/rules` · `/acceptrules` | — | Players | Read the rules and accept them (required once per account) |
-| `/premium [confirm]` | — | Players · OP | Self-service, or `/premium <player>` for OP — marks the account licensed |
-| `/unpremium [confirm]` | — | Players · OP | Revert to cracked mode; playerdata is carried back to the offline UUID |
-| `/setpassword <player> <pass>` | — | OP | Set a password for an account that has none |
-| `/transferaccount <from> <to>` | — | OP | Move playerdata between two account names |
-| `/account <player>` · `/accountip` · `/multiaccounts` | — | OP | Look up accounts sharing an IP |
-| `/attempts [recent\|player <name>\|ip <addr>] [limit]` | — | OP | Review **failed** login attempts — who tried to get into an account and did not succeed |
+Complete reference. Access is gated by three levels: **everyone**, **staff** (vanilla OP level 2,
+`LEVEL_GAMEMASTERS`) and **console** (the server console only — see below).
 
-### Console-only commands
+### For every player
+
+| Command | Alias | What it does |
+|---|---|---|
+| `/login <password>` | `/l` | Log in to a registered account. Blocked while the address is rate-limited. |
+| `/register <password> <password>` | `/reg` | Create an account. The rules must be accepted first. With `register_confirm_required = false` the single-argument form `/register <password>` also works. |
+| `/rules` | — | Show the rules, first page. |
+| `/rules page <n>` | — | Jump to a page. |
+| `/rules categories` | — | List all rule sections. |
+| `/rules links` | — | Site, Discord, Telegram and the rest, clickable. |
+| `/acceptrules` | — | Accept the rules. Required once per account; a licensed player is asked exactly like a cracked one. |
+| `/changepassword <old> <new> <new>` | — | Change your own password. Requires being logged in. |
+| `/premium` → `/premium confirm` | — | Mark **your own** account as licensed. Warns first: after this, entry is only possible from a licensed client. |
+| `/unpremium` → `/unpremium confirm` | — | Return **your own** account to password login. Your progress is carried back to the offline UUID. |
+
+### For staff (OP level 2)
+
+**Account state**
+
+| Command | What it does |
+|---|---|
+| `/premium <player>` | Mark someone's account licensed. The next connection is forced through Mojang. |
+| `/unpremium <player> [password]` | Return an account to password login and carry its progress back to the offline UUID. Without a password the account is left with none — set one with `/setpassword`. |
+| `/setpassword <player> <password>` | Set a password for an account that has none (e.g. one that was licensed). |
+| `/forceregister <player> <password>` | Create an account for a player. They still have to accept the rules on join. |
+| `/forcelogin <player>` | Let an online player through the password gate. The rules gate still applies. |
+| `/unregister <player>` | Delete the database record. World data is untouched. |
+| `/purgeaccount <player>` | Full wipe — database record, playerdata, stats, advancements, LuckPerms. Creates a restorable backup. |
+| `/clearautheffects <player>` | Remove blindness / slowness / invisibility left over from the login lockdown. |
+
+**Investigation**
+
+| Command | What it does |
+|---|---|
+| `/account <player>` | Which accounts share this player's last IP. |
+| `/account ip <address>` | Which accounts belong to an address. |
+| `/accountip <player>` | This player's last known address. |
+| `/multiaccounts <count>` | Every address with more than `<count>` accounts on it. |
+| `/attempts [limit]` | Latest **failed** login attempts server-wide. |
+| `/attempts recent [limit]` | Same, explicit form. |
+| `/attempts player <name> [limit]` | Who tried to get into this account and failed — grouped by source address. |
+| `/attempts ip <address> [limit]` | Which accounts this address went after — grouped by target account. |
+
+> `/account ip` shows who an address **belongs to**; `/attempts ip` shows what it **tried to break into**.
+> Read together they answer "several accounts share this IP — which of them was probing the others".
+
+**Data transfer**
+
+| Command | What it does |
+|---|---|
+| `/transferaccount <from> <to>` | Move playerdata, stats, advancements, scoreboard scores and LuckPerms nodes between accounts. The source is deleted so nothing is duplicated. |
+| `/transferaccount <from> <to> keep_source` | Same, but the source is left intact — may duplicate items. |
+| `/transferaccount backups` | List restorable transfer backups. |
+| `/transferaccount restore <id>` | Undo a transfer or a purge. |
+| `/importauthme [path]` | Import accounts from an AuthMe SQLite file. Defaults to `plugins/AuthMe/authme.db`. |
+| `/rules reload` | Re-read `config/goida_rules.json` without a restart. |
+
+### Console only
 
 Reachable **only from the server console** — not from an operator, a command block, a function or
-RCON. These erase account-linkage evidence, so they are deliberately kept away from OP: an
-administrator without shell access cannot use them to cover tracks.
+RCON. Everything here destroys evidence, so it is deliberately kept away from OP: an administrator
+without shell access cannot use these to cover their tracks.
 
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/goidaauth forget <holder> <target>` | Clears `last_ip` + `hwid` of **`target`**, so it stops appearing in `holder`'s shared-IP report. Only `target` is touched, so the argument order matters. |
+| `/goidaauth forget <holder> <target>` | Clears `last_ip` + `hwid` of **`target`**, so it stops appearing in `holder`'s shared-IP report. Only `target` is touched — the argument order is the direction. |
 | `/goidaauth forget <holder> ip <address>` | Same, applied to every account on that address except `holder`. |
-| `/goidaauth attempts clear player <name>` · `ip <address>` | Deletes recorded failed login attempts. An OP who did the probing must not be able to erase the record of it. |
+| `/goidaauth attempts clear player <name>` | Deletes the recorded failed attempts aimed at an account. |
+| `/goidaauth attempts clear ip <address>` | Deletes the recorded failed attempts made from an address. |
 
-Both print what will be cleared and require an explicit `confirm` as the last argument. Note this
-clears *history*, it does not suppress future linkage: `last_ip` is written again the next time the
-account logs in successfully.
+Every console command first prints what it is about to remove and needs an explicit `confirm` as the
+last argument. Note that `forget` clears *history*, it does not suppress future linkage: `last_ip` is
+written again the next time that account logs in successfully.
 
-**Permission nodes** (PermissionAPI-compatible):
-
-| Node | Default |
-|---|---|
-| `goidaauth.command.login` | everyone |
-| `goidaauth.command.register` | everyone |
-| `goidaauth.command.premium` | OP level 2 |
-| `goidaauth.command.transferaccount` | OP level 2 |
+**Permission nodes.** The mod publishes `goidaauth.command.login`, `goidaauth.command.register` and
+`goidaauth.command.premium` through NeoForge's PermissionAPI so permission plugins can see them, but
+access is currently decided by the OP levels above — the nodes are not consulted yet.
 
 ---
 
