@@ -54,7 +54,7 @@ public final class AuthCommands {
         registerMultiAccounts(d, "multiaccounts", db);
         registerTransferAccount(d, "transferaccount", db);
         registerPurgeAccount(d, "purgeaccount", db);
-        registerAcceptRules(d, "acceptrules", sessions);
+        registerAcceptRules(d, "acceptrules", db, sessions);
     }
 
     // ---- Command registration ----
@@ -301,10 +301,6 @@ public final class AuthCommands {
         return ts != null && (System.currentTimeMillis() - ts) <= CONFIRM_TTL_MS;
     }
 
-    private static UUID offlineUuid(String name) {
-        return UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(StandardCharsets.UTF_8));
-    }
-
     private static int handlePremiumSelfPrompt(CommandContext<CommandSourceStack> ctx,
                                                AuthSessionManager sessions) {
         ServerPlayer player = sourcePlayer(ctx);
@@ -411,10 +407,10 @@ public final class AuthCommands {
             }
 
             UUID real = player.getUUID();
-            UUID offline = offlineUuid(username);
+            UUID offline = AuthSession.offlineUuid(username);
             // Carry the player's current (premium) progress down to the offline UUID so they don't
             // lose their inventory when they come back as a cracked player.
-            reverseMigrateToOffline(player, real, offline);
+            reverseMigrateToOffline(player.server, username, real, offline);
 
             boolean hasRealPassword = !opt.get().passwordHash().startsWith("premium:");
             if (hasRealPassword) {
@@ -453,36 +449,40 @@ public final class AuthCommands {
     }
 
     /**
-     * Copies the player's current real-UUID data down to their offline UUID (overwriting), so a
-     * premium→cracked downgrade keeps their progress. Runs on the server thread.
+     * Copies an account's real-UUID data down to its offline UUID (overwriting), so a
+     * premium→cracked downgrade keeps the player's progress. Runs on the server thread.
+     *
+     * <p>Both {@code /unpremium} paths route through here. The admin path used to change the DB
+     * UUID to the offline one without moving any files, which silently orphaned the player's
+     * inventory, stats and advancements under the old UUID.
      */
-    private static void reverseMigrateToOffline(ServerPlayer player, UUID real, UUID offline) {
+    private static void reverseMigrateToOffline(net.minecraft.server.MinecraftServer server,
+                                                String username, UUID real, UUID offline) {
         if (real.equals(offline)) return;
         try {
-            var server = player.server;
             server.getPlayerList().saveAll(); // flush current in-memory state to the real-UUID files
             Path root = server.getWorldPath(LevelResource.ROOT);
-            copyPrefixOverwrite(root.resolve("playerdata"), real.toString(), offline.toString(), player);
+            copyPrefixOverwrite(root.resolve("playerdata"), real.toString(), offline.toString(), username);
             copyOverwrite(root.resolve("advancements").resolve(real + ".json"),
-                          root.resolve("advancements").resolve(offline + ".json"), player, "advancements");
+                          root.resolve("advancements").resolve(offline + ".json"), username, "advancements");
             copyOverwrite(root.resolve("stats").resolve(real + ".json"),
-                          root.resolve("stats").resolve(offline + ".json"), player, "stats");
+                          root.resolve("stats").resolve(offline + ".json"), username, "stats");
             for (String pattern : Config.TRANSFER_EXTRA_FILES.get()) {
                 copyOverwrite(root.resolve(pattern.replace("{uuid}", real.toString())),
-                              root.resolve(pattern.replace("{uuid}", offline.toString())), player, pattern);
+                              root.resolve(pattern.replace("{uuid}", offline.toString())), username, pattern);
             }
         } catch (Exception e) {
             ru.goidacraft.goidaauth.GoidaAuth.LOGGER.warn("reverse playerdata migration failed for {}: {}",
-                    player.getGameProfile().getName(), e.getMessage());
+                    username, e.getMessage());
         }
     }
 
-    private static void copyPrefixOverwrite(Path dir, String srcPrefix, String dstPrefix, ServerPlayer player) {
+    private static void copyPrefixOverwrite(Path dir, String srcPrefix, String dstPrefix, String username) {
         if (!Files.isDirectory(dir)) return;
         try (Stream<Path> files = Files.list(dir)) {
             files.filter(p -> p.getFileName().toString().startsWith(srcPrefix)).forEach(src -> {
                 String dstName = dstPrefix + src.getFileName().toString().substring(srcPrefix.length());
-                copyOverwrite(src, dir.resolve(dstName), player, dir.getFileName().toString());
+                copyOverwrite(src, dir.resolve(dstName), username, dir.getFileName().toString());
             });
         } catch (Exception e) {
             ru.goidacraft.goidaauth.GoidaAuth.LOGGER.warn("copyPrefixOverwrite failed in {}: {}",
@@ -490,16 +490,16 @@ public final class AuthCommands {
         }
     }
 
-    private static void copyOverwrite(Path src, Path dst, ServerPlayer player, String label) {
+    private static void copyOverwrite(Path src, Path dst, String username, String label) {
         try {
             if (!Files.exists(src)) return;
             Files.createDirectories(dst.getParent());
             Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
             ru.goidacraft.goidaauth.GoidaAuth.LOGGER.info("Reverse-migrated {} for {}: {} → {}",
-                    label, player.getGameProfile().getName(), src.getFileName(), dst.getFileName());
+                    label, username, src.getFileName(), dst.getFileName());
         } catch (Exception e) {
             ru.goidacraft.goidaauth.GoidaAuth.LOGGER.warn("Could not reverse-migrate {} for {}: {}",
-                    label, player.getGameProfile().getName(), e.getMessage());
+                    label, username, e.getMessage());
         }
     }
 
@@ -513,8 +513,10 @@ public final class AuthCommands {
                 return;
             }
             UUID oldUuid = opt.get().uuid();
-            UUID offlineUUID = UUID.nameUUIDFromBytes(
-                    ("OfflinePlayer:" + targetName).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            UUID offlineUUID = AuthSession.offlineUuid(targetName);
+            // Same progress rescue the self-service path does: without it the account keeps playing
+            // under a UUID nothing points at any more and looks wiped on the next join.
+            reverseMigrateToOffline(source.getServer(), targetName, oldUuid, offlineUUID);
             db.setPremium(targetName, false, offlineUUID)
               .thenRun(() -> ru.goidacraft.goidaauth.GoidaAuthApi.fireUuidChanged(oldUuid, offlineUUID, targetName))
               .whenComplete((v, err) -> source.getServer().execute(() -> {
@@ -560,22 +562,21 @@ public final class AuthCommands {
                 return;
             }
             ServerPlayer online = server.getPlayerList().getPlayerByName(targetName);
-            UUID uuid = online != null
-                    ? online.getUUID()
-                    : UUID.nameUUIDFromBytes(("OfflinePlayer:" + targetName).getBytes(StandardCharsets.UTF_8));
+            UUID uuid = online != null ? online.getUUID() : AuthSession.offlineUuid(targetName);
             String hash = hasher.hash(password.toCharArray());
             String ip = online != null ? online.getIpAddress() : null;
 
-            db.register(uuid, targetName, hash, false, ip).thenRun(() -> server.execute(() -> {
+            // rules_accepted stays false: an admin creating the account does not read the rules
+            // on the player's behalf, so the player is still asked once on join.
+            db.register(uuid, targetName, hash, false, ip, false).thenRun(() -> server.execute(() -> {
                 source.sendSuccess(() -> Component.literal(
                         "§aИгрок §f" + targetName + "§a зарегистрирован."), true);
                 if (online != null) {
                     AuthSession session = sessions.get(online.getUUID()).orElse(null);
                     if (session != null && !session.isAuthorized()) {
-                        session.setAuthorized(true);
                         session.setRegistered(true);
-                        ru.goidacraft.goidaauth.events.AuthEventHandler.onAuthorized(online, session);
-                        send(online, "§aВас зарегистрировал и авторизовал администратор.");
+                        send(online, "§aВас зарегистрировал администратор.");
+                        ru.goidacraft.goidaauth.events.AuthEventHandler.grantAccess(online, session, false);
                     }
                 }
             })).exceptionally(ex -> {
@@ -611,10 +612,9 @@ public final class AuthCommands {
             source.sendFailure(Component.literal("§eИгрок §f" + targetName + "§e уже авторизован."));
             return 0;
         }
-        session.setAuthorized(true);
         session.setRegistered(true);
-        ru.goidacraft.goidaauth.events.AuthEventHandler.onAuthorized(online, session);
         send(online, "§aВас авторизовал администратор.");
+        ru.goidacraft.goidaauth.events.AuthEventHandler.grantAccess(online, session, false);
         source.sendSuccess(() -> Component.literal("§aИгрок §f" + targetName + "§a авторизован."), true);
         return 1;
     }
@@ -871,6 +871,11 @@ public final class AuthCommands {
                 player.server.execute(() -> send(player, Config.MSG_NOT_REGISTERED.get()));
                 return;
             }
+            if (opt.get().hasNoPassword()) {
+                player.server.execute(() -> send(player,
+                        "§cУ этого аккаунта нет пароля. Обратитесь к администрации."));
+                return;
+            }
             String storedHash = opt.get().passwordHash();
             boolean ok = hasher.verify(storedHash, password.toCharArray());
             // Upgrade BCrypt → PBKDF2 on successful login (still on IO thread)
@@ -880,7 +885,13 @@ public final class AuthCommands {
             player.server.execute(() -> {
                 if (!sessions.get(player.getUUID()).map(s -> s == session).orElse(false)) return;
                 if (!ok) {
+                    // Nothing about this connection is written to the account on a failure — the
+                    // stored IP/last_seen must only ever describe the real owner's logins.
                     int fails = session.incrementFailures();
+                    ru.goidacraft.goidaauth.GoidaAuth.LOGGER.warn(
+                            "Failed /login for '{}' from {} (attempt {}/{})",
+                            username, DatabaseManager.normalizeIp(player.getIpAddress()),
+                            fails, Config.MAX_LOGIN_ATTEMPTS.get());
                     if (fails >= Config.MAX_LOGIN_ATTEMPTS.get()) {
                         player.connection.disconnect(Component.literal(Config.MSG_LOGIN_FAIL.get()));
                     } else {
@@ -888,11 +899,10 @@ public final class AuthCommands {
                     }
                     return;
                 }
-                session.setAuthorized(true);
                 session.setRegistered(true);
                 db.updateLastSeen(username, player.getIpAddress());
-                ru.goidacraft.goidaauth.events.AuthEventHandler.onAuthorized(player, session);
                 send(player, Config.MSG_LOGIN_SUCCESS.get());
+                ru.goidacraft.goidaauth.events.AuthEventHandler.grantAccess(player, session, false);
             });
         }).exceptionally(ex -> {
             ru.goidacraft.goidaauth.GoidaAuth.LOGGER.error("Login lookup failed for {}", username, ex);
@@ -938,13 +948,13 @@ public final class AuthCommands {
                 return;
             }
             String hash = hasher.hash(password.toCharArray());
-            db.register(player.getUUID(), username, hash, false, ip)
+            // The rules gate above already passed, so persist that with the new account.
+            db.register(player.getUUID(), username, hash, false, ip, true)
                     .thenRun(() -> player.server.execute(() -> {
                         if (!sessions.get(player.getUUID()).map(s -> s == session).orElse(false)) return;
-                        session.setAuthorized(true);
                         session.setRegistered(true);
-                        ru.goidacraft.goidaauth.events.AuthEventHandler.onAuthorized(player, session);
                         send(player, Config.MSG_REGISTER_SUCCESS.get());
+                        ru.goidacraft.goidaauth.events.AuthEventHandler.grantAccess(player, session, false);
                     }))
                     .exceptionally(ex -> {
                         ru.goidacraft.goidaauth.GoidaAuth.LOGGER.error("DB register failed for {}", username, ex);
@@ -1016,8 +1026,7 @@ public final class AuthCommands {
                     UUID toUuid = toOnline != null
                             ? toOnline.getUUID()
                             : toOpt.map(ru.goidacraft.goidaauth.database.UserRecord::uuid)
-                                   .orElseGet(() -> UUID.nameUUIDFromBytes(
-                                           ("OfflinePlayer:" + toName).getBytes(StandardCharsets.UTF_8)));
+                                   .orElseGet(() -> AuthSession.offlineUuid(toName));
 
                     if (fromUuid.equals(toUuid)) {
                         source.sendFailure(Component.literal(
@@ -1080,13 +1089,19 @@ public final class AuthCommands {
     }
 
     private static void registerAcceptRules(CommandDispatcher<CommandSourceStack> d, String name,
-                                            AuthSessionManager sessions) {
+                                            DatabaseManager db, AuthSessionManager sessions) {
         d.register(LiteralArgumentBuilder.<CommandSourceStack>literal(name)
                 .requires(src -> true)
-                .executes(ctx -> handleAcceptRules(ctx, sessions)));
+                .executes(ctx -> handleAcceptRules(ctx, db, sessions)));
     }
 
-    private static int handleAcceptRules(CommandContext<CommandSourceStack> ctx, AuthSessionManager sessions) {
+    /**
+     * The single rules gate, shared by everyone. A player whose identity is already proven (premium
+     * session, password, session auto-login) starts playing right here; a brand-new player goes on
+     * to register. Acceptance is persisted so it is asked exactly once per account.
+     */
+    private static int handleAcceptRules(CommandContext<CommandSourceStack> ctx,
+                                         DatabaseManager db, AuthSessionManager sessions) {
         ServerPlayer player = sourcePlayer(ctx);
         if (player == null) return 0;
         AuthSession session = sessions.get(player.getUUID()).orElse(null);
@@ -1099,9 +1114,20 @@ public final class AuthCommands {
             send(player, "§eВы уже приняли правила. " + Config.MSG_REGISTER_PROMPT.get());
             return 0;
         }
+
         session.setRulesAccepted(true);
-        send(player, "§aВы приняли правила сервера. Добро пожаловать!");
-        send(player, Config.MSG_REGISTER_PROMPT.get());
+        if (session.isRegistered()) {
+            db.setRulesAccepted(session.username);
+        }
+        send(player, "§aВы приняли правила сервера.");
+
+        if (session.isIdentityVerified()) {
+            session.setAuthorized(true);
+            ru.goidacraft.goidaauth.events.AuthEventHandler.onAuthorized(player, session);
+            send(player, "§aДобро пожаловать! Приятной игры.");
+        } else {
+            send(player, Config.MSG_REGISTER_PROMPT.get());
+        }
         return 1;
     }
 
@@ -1126,9 +1152,7 @@ public final class AuthCommands {
         db.findByName(name).thenAccept(opt -> server.execute(() -> {
             ServerPlayer online = server.getPlayerList().getPlayerByName(name);
             UUID uuid = opt.map(ru.goidacraft.goidaauth.database.UserRecord::uuid)
-                    .orElseGet(() -> online != null
-                            ? online.getUUID()
-                            : UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(StandardCharsets.UTF_8)));
+                    .orElseGet(() -> online != null ? online.getUUID() : AuthSession.offlineUuid(name));
             ru.goidacraft.goidaauth.database.UserRecord record = opt.orElse(null);
 
             AccountTransfer.purge(server, db, name, record, uuid)

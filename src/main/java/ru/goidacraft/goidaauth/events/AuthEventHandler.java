@@ -24,6 +24,7 @@ import ru.goidacraft.goidaauth.GoidaAuth;
 import ru.goidacraft.goidaauth.GoidaAuthApi;
 import ru.goidacraft.goidaauth.auth.AuthSession;
 import ru.goidacraft.goidaauth.auth.AuthSessionManager;
+import ru.goidacraft.goidaauth.auth.LoginDecision;
 import ru.goidacraft.goidaauth.commands.AuthCommands;
 import ru.goidacraft.goidaauth.compat.LuckPermsLoginGate;
 import ru.goidacraft.goidaauth.database.DatabaseManager;
@@ -52,85 +53,32 @@ public final class AuthEventHandler {
         var server = player.server;
         String username = player.getGameProfile().getName();
 
-        // Premium proof behind a proxy: Velocity forced online-mode and NeoVelocity forwarded the
-        // Mojang-signed `textures` property. No signed textures => cracked/offline connection.
-        boolean sessionVerified = hasSignedTextures(player.getGameProfile());
-
-        AuthSession session = new AuthSession(player.getUUID(), username, sessionVerified, server.getTickCount());
+        AuthSession session = new AuthSession(player.getUUID(), username, server.getTickCount());
         session.storePosition(player.position(), player.getYRot(), player.getXRot(),
                 player.level().dimension().location().toString());
         sessions.put(session);
-        player.server.getCommands().sendCommands(player);
+
+        // Everyone is locked down on arrival, licensed or not. Nothing is released before the
+        // database has answered — the account state in the DB is the only authority on who may
+        // skip the password.
+        applyLockdown(player);
+        server.getCommands().sendCommands(player);
         notifySharedIpAccounts(player);
 
         var db = GoidaAuth.get().database();
-
-        if (sessionVerified) {
-            // Full Mojang session verified — authorize immediately, no lockdown needed
-            session.setAuthorized(true);
-            AuthCommands.send(player, Config.MSG_PREMIUM_AUTOLOGIN.get());
-            db.findByName(username).thenAccept(opt -> server.execute(() -> {
-                if (!sessions.get(player.getUUID()).map(s -> s == session).orElse(false)) return;
-                session.setRegistered(opt.isPresent());
-                if (opt.isEmpty()) {
-                    db.register(player.getUUID(), username,
-                            "premium:" + player.getUUID(), true, player.getIpAddress());
-                } else if (!opt.get().premium()) {
-                    // DB says premium=false (admin forced cracked) but the player reached us via
-                    // Mojang auth. This only happens during a race: admin ran /unpremium while the
-                    // player reconnected before the DB write committed, so Velocity still saw the
-                    // old premium=true and forced online-mode. Do NOT auto-promote — that would
-                    // silently undo the admin's command. Just update last_seen; Velocity will
-                    // correctly route them to offline-mode on the next connection.
-                    GoidaAuth.LOGGER.warn(
-                        "onLoggedIn: {} connected with Mojang session but DB has premium=false " +
-                        "(probable race with /unpremium). Skipping auto-promote.", username);
-                    db.updateLastSeen(username, player.getIpAddress());
-                } else {
-                    // Already premium. Reconcile the stored UUID to the real Mojang UUID — this is
-                    // the first online login after a self /premium, where the DB still holds the
-                    // offline UUID. (PlayerDataMigrationMixin already moved playerdata offline→real.)
-                    UUID oldUuid = opt.get().uuid();
-                    if (!oldUuid.equals(player.getUUID())) {
-                        db.setPremium(username, true, player.getUUID())
-                          .thenRun(() -> GoidaAuthApi.fireUuidChanged(oldUuid, player.getUUID(), username));
-                    } else {
-                        db.updateLastSeen(username, player.getIpAddress());
-                    }
-                }
-                ru.goidacraft.goidaauth.GoidaAuthApi.fireAuthorized(player, true, opt.isPresent());
-            }));
-            return;
-        }
-
-        applyLockdown(player);
-
         String normalizedIp = DatabaseManager.normalizeIp(player.getIpAddress());
         CompletableFuture<Optional<UserRecord>> dbFuture = db.findByName(username);
         CompletableFuture<Boolean> twinkFuture =
                 TwinkProtection.checkAsync(username, normalizedIp, player.getUUID(), db);
 
         CompletableFuture.allOf(dbFuture, twinkFuture).thenRun(() -> server.execute(() -> {
-            if (!sessions.get(player.getUUID()).map(s -> s == session).orElse(false)) return;
+            if (!isCurrentSession(player, session)) return;
 
             if (twinkFuture.join()) {
                 player.connection.disconnect(Component.literal(Config.MSG_TWINK_KICK.get()));
                 return;
             }
-
-            Optional<UserRecord> dbOpt = dbFuture.join();
-            if (dbOpt.isPresent() && dbOpt.get().premium()) {
-                player.connection.disconnect(Component.literal(Config.MSG_PREMIUM_KICK.get()));
-                return;
-            }
-            session.setRegistered(dbOpt.isPresent());
-            session.setRulesAccepted(dbOpt.isPresent());
-            if (dbOpt.isPresent() && trySessionAutoLogin(player, session, dbOpt.get())) return;
-            if (dbOpt.isPresent()) {
-                AuthCommands.send(player, Config.MSG_LOGIN_PROMPT.get());
-            } else {
-                sendRulesWelcome(player);
-            }
+            resolveIdentity(player, session, dbFuture.join());
         })).exceptionally(ex -> {
             GoidaAuth.LOGGER.error("Login flow failed for {}", username, ex);
             server.execute(() -> {
@@ -142,14 +90,111 @@ public final class AuthEventHandler {
         });
     }
 
-    /** True if the forwarded GameProfile carries a Mojang-signed `textures` property. */
-    private static boolean hasSignedTextures(com.mojang.authlib.GameProfile profile) {
-        for (com.mojang.authlib.properties.Property p : profile.getProperties().get("textures")) {
-            // authlib 1.20.2+ (used by 1.21.1) models Property as a record: signature().
-            String signature = p.signature();
-            if (signature != null && !signature.isBlank()) return true;
+    /**
+     * Decides how this connection proves who it is. Runs on the server thread once the DB row (if
+     * any) is known.
+     *
+     * <p>The premium proof is the connection's UUID, not its profile properties. Velocity assigns
+     * the real Mojang UUID after an online-mode handshake and the derived offline UUID after
+     * {@code forceOfflineMode}, so the two are distinguishable and cannot be chosen by the client.
+     * A signed {@code textures} property — what this code used to trust — proves nothing: skin
+     * plugins (SkinsRestorer and friends) attach genuine Mojang-signed textures to offline players,
+     * which handed every such pirate a password-free login into whatever account they named.
+     */
+    private void resolveIdentity(ServerPlayer player, AuthSession session, Optional<UserRecord> dbOpt) {
+        String username = session.username;
+        boolean mojangVerified = !player.getUUID().equals(AuthSession.offlineUuid(username));
+
+        session.setRegistered(dbOpt.isPresent());
+        session.setRulesAccepted(dbOpt.map(UserRecord::rulesAccepted).orElse(false));
+
+        LoginDecision decision = LoginDecision.of(
+                mojangVerified, dbOpt.isPresent(), dbOpt.map(UserRecord::premium).orElse(false));
+
+        switch (decision) {
+            case REJECT_IMPOSTOR -> {
+                // A licensed name arriving over an offline connection: an impostor, or the proxy
+                // routed offline because the shared DB was briefly unreachable. Either way the
+                // account is not handed out — the owner reconnects and is routed online.
+                player.connection.disconnect(Component.literal(Config.MSG_PREMIUM_KICK.get()));
+                return;
+            }
+            case PREMIUM_LOGIN, PREMIUM_FIRST_JOIN -> {
+                completePremiumLogin(player, session, dbOpt);
+                return;
+            }
+            case PASSWORD -> {
+                if (mojangVerified) {
+                    GoidaAuth.LOGGER.warn("{} arrived Mojang-verified but the DB has premium=false "
+                            + "— applying the password gate.", username);
+                }
+            }
         }
-        return false;
+
+        if (dbOpt.isPresent() && trySessionAutoLogin(player, session, dbOpt.get())) return;
+
+        if (dbOpt.isEmpty()) {
+            promptRules(player, session);
+        } else if (dbOpt.get().hasNoPassword()) {
+            AuthCommands.send(player, "§cУ этого аккаунта нет пароля (он был лицензионным).");
+            AuthCommands.send(player, "§cОбратитесь к администрации — пароль ставится командой §f/setpassword§c.");
+        } else {
+            AuthCommands.send(player, Config.MSG_LOGIN_PROMPT.get());
+        }
+    }
+
+    /** Writes/reconciles the DB row for a Mojang-verified connection, then lets the player in. */
+    private void completePremiumLogin(ServerPlayer player, AuthSession session, Optional<UserRecord> dbOpt) {
+        var db = GoidaAuth.get().database();
+        String username = session.username;
+
+        if (dbOpt.isEmpty()) {
+            // First join of a licensed player we have never seen. The password column gets a
+            // placeholder that no password can ever match (see UserRecord.hasNoPassword).
+            db.register(player.getUUID(), username, "premium:" + player.getUUID(),
+                    true, player.getIpAddress(), false);
+            // The row exists from here on, so /acceptrules can persist against it.
+            session.setRegistered(true);
+        } else {
+            // Reconcile the stored UUID to the real Mojang UUID on the first online login after a
+            // self-service /premium, where the DB still holds the offline UUID.
+            // (PlayerDataMigrationMixin has already moved the playerdata offline -> real.)
+            UUID oldUuid = dbOpt.get().uuid();
+            if (!oldUuid.equals(player.getUUID())) {
+                db.setPremium(username, true, player.getUUID())
+                  .thenRun(() -> GoidaAuthApi.fireUuidChanged(oldUuid, player.getUUID(), username));
+            } else {
+                db.updateLastSeen(username, player.getIpAddress());
+            }
+        }
+
+        AuthCommands.send(player, Config.MSG_PREMIUM_AUTOLOGIN.get());
+        grantAccess(player, session, true);
+    }
+
+    /**
+     * Single exit point for every successful identity check — premium session, password, session
+     * auto-login and the admin force commands all land here.
+     *
+     * <p>The rules gate is applied uniformly: a licensed player has read the rules exactly as often
+     * as a cracked one (never), so both are held until they accept. Previously the premium path
+     * returned straight from the login event and skipped rules entirely.
+     */
+    public static void grantAccess(ServerPlayer player, AuthSession session, boolean premium) {
+        session.setPremium(premium);
+        session.setIdentityVerified(true);
+
+        if (!session.isRulesAccepted()) {
+            session.resetTimeout(player.server.getTickCount());
+            promptRules(player, session);
+            return;
+        }
+        session.setAuthorized(true);
+        onAuthorized(player, session);
+    }
+
+    private boolean isCurrentSession(ServerPlayer player, AuthSession session) {
+        return sessions.get(player.getUUID()).map(s -> s == session).orElse(false);
     }
 
     public void onLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
@@ -172,8 +217,11 @@ public final class AuthEventHandler {
             }
         }
 
-        long elapsedTicks = player.server.getTickCount() - s.joinTickStamp;
-        if (elapsedTicks > Config.LOGIN_TIMEOUT_SEC.get() * 20L) {
+        // Reading the rules takes longer than typing a password, so the rules stage gets its own
+        // (larger) budget. Applies to everyone waiting on the rules, licensed or cracked.
+        int limitSec = s.isRulesAccepted() ? Config.LOGIN_TIMEOUT_SEC.get() : Config.RULES_TIMEOUT_SEC.get();
+        long elapsedTicks = player.server.getTickCount() - s.timeoutBaseTick();
+        if (elapsedTicks > limitSec * 20L) {
             player.connection.disconnect(Component.literal(Config.MSG_TIMEOUT_KICK.get()));
         }
     }
@@ -255,7 +303,9 @@ public final class AuthEventHandler {
     }
 
     public static void applyLockdown(ServerPlayer player) {
-        int duration = (Config.LOGIN_TIMEOUT_SEC.get() + 5) * 20;
+        // Cover the longest stage a player can legitimately sit in (rules reading), so the effects
+        // never lapse while they are still locked down.
+        int duration = (Math.max(Config.LOGIN_TIMEOUT_SEC.get(), Config.RULES_TIMEOUT_SEC.get()) + 5) * 20;
         if (Config.APPLY_BLINDNESS.get()) {
             player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, duration, 0, false, false, false));
         }
@@ -304,14 +354,20 @@ public final class AuthEventHandler {
 
         player.server.getCommands().sendCommands(player);
 
-        // Notify downstream mods (e.g. GoidaDI) that the player may now play. Covers the cracked
-        // login/register/session/force paths; the premium auto-login branch fires separately.
-        ru.goidacraft.goidaauth.GoidaAuthApi.fireAuthorized(player, session.premiumVerified, session.isRegistered());
+        // Only now is anything about this connection written to the account. A failed attempt on
+        // someone else's nickname must leave no trace on that account (IP, last_seen, fingerprint),
+        // otherwise the twink/IP checks start firing on the victim rather than the intruder.
+        TwinkProtection.persistHwid(player);
+
+        // Notify downstream mods (e.g. GoidaDI) that the player may now play. Every authorization
+        // path routes through here, so this fires exactly once per session.
+        GoidaAuthApi.fireAuthorized(player, session.isPremium(), session.isRegistered());
     }
 
     private boolean trySessionAutoLogin(ServerPlayer player, AuthSession session, UserRecord record) {
         if (!Config.SESSION_ENABLED.get()) return false;
         if (record.premium()) return false;
+        if (record.hasNoPassword()) return false;
         if (record.lastSeen() == null) return false;
         int timeoutMin = Config.SESSION_TIMEOUT_MIN.get();
         if (timeoutMin <= 0) return false;
@@ -325,21 +381,24 @@ public final class AuthEventHandler {
             if (currentIp == null || lastIp == null || !lastIp.equals(currentIp)) return false;
         }
 
-        session.setAuthorized(true);
-        session.setRegistered(true);
         GoidaAuth.get().database().updateLastSeen(record.username(), player.getIpAddress());
-        onAuthorized(player, session);
         AuthCommands.send(player, Config.MSG_SESSION_AUTOLOGIN.get());
+        grantAccess(player, session, false);
         return true;
     }
 
     private static final String SEP = "§8§m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
 
-    public static void sendRulesWelcome(ServerPlayer player) {
+    /**
+     * The one rules prompt, shown to every player who has not accepted them yet. The closing line
+     * differs only in what happens after {@code /acceptrules}: a player whose identity is already
+     * proven starts playing, a new one goes on to register.
+     */
+    public static void promptRules(ServerPlayer player, AuthSession session) {
         AuthCommands.send(player, SEP);
         AuthCommands.send(player, "  §6§lДобро пожаловать на GoidaCraft!");
         AuthCommands.send(player, SEP);
-        AuthCommands.send(player, "§fПеред регистрацией необходимо ознакомиться с правилами сервера.");
+        AuthCommands.send(player, "§fНеобходимо ознакомиться с правилами сервера и принять их.");
 
         MutableComponent readLine = Component.literal("§7Введите ").append(
                 Component.literal("§f/rules")
@@ -350,13 +409,16 @@ public final class AuthEventHandler {
                 .append(Component.literal("§7 чтобы прочитать правила."));
         player.sendSystemMessage(readLine);
 
+        String tail = session.isIdentityVerified()
+                ? "§7 чтобы начать игру."
+                : "§7 для продолжения регистрации.";
         MutableComponent acceptLine = Component.literal("§7Прочитав правила, введите ").append(
                 Component.literal("§f/acceptrules")
                         .withStyle(s -> s
                                 .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/acceptrules"))
                                 .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
-                                        Component.literal("§7Принять правила и начать регистрацию")))))
-                .append(Component.literal("§7 для продолжения."));
+                                        Component.literal("§7Принять правила")))))
+                .append(Component.literal(tail));
         player.sendSystemMessage(acceptLine);
 
         AuthCommands.send(player, "");

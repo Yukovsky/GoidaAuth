@@ -27,7 +27,6 @@ import ru.goidacraft.goidaauth.auth.PasswordHasher;
 import ru.goidacraft.goidaauth.commands.AuthCommands;
 import ru.goidacraft.goidaauth.database.DatabaseManager;
 import ru.goidacraft.goidaauth.events.AuthEventHandler;
-import ru.goidacraft.goidaauth.mojang.MojangApi;
 import ru.goidacraft.goidaauth.permissions.AuthPermissions;
 import ru.goidacraft.goidaauth.rules.RulesCommand;
 import ru.goidacraft.goidaauth.rules.RulesConfig;
@@ -44,7 +43,6 @@ public final class GoidaAuth {
     private final DatabaseManager database = new DatabaseManager();
     private final PasswordHasher hasher = new PasswordHasher();
     private final AuthSessionManager sessions = new AuthSessionManager();
-    private final MojangApi mojang = new MojangApi();
     private final RulesConfig rulesConfig = new RulesConfig(Path.of("config"));
 
     public GoidaAuth(IEventBus modBus, ModContainer container) {
@@ -115,6 +113,5 @@ public final class GoidaAuth {
     public DatabaseManager database() { return database; }
     public PasswordHasher hasher() { return hasher; }
     public AuthSessionManager sessions() { return sessions; }
-    public MojangApi mojang() { return mojang; }
     public RulesConfig rulesConfig() { return rulesConfig; }
 }

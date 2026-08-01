@@ -7,9 +7,6 @@ import java.util.List;
 public final class Config {
     public static final ModConfigSpec SPEC;
 
-    public static final ModConfigSpec.BooleanValue PREMIUM_AUTOLOGIN;
-    public static final ModConfigSpec.IntValue MOJANG_TIMEOUT_MS;
-    public static final ModConfigSpec.IntValue MOJANG_CACHE_TTL_MIN;
     public static final ModConfigSpec.IntValue LUCKPERMS_DEFER_TICKS;
 
     public static final ModConfigSpec.ConfigValue<String> DB_MODE;
@@ -22,6 +19,7 @@ public final class Config {
     public static final ModConfigSpec.BooleanValue        DB_USE_SSL;
 
     public static final ModConfigSpec.IntValue LOGIN_TIMEOUT_SEC;
+    public static final ModConfigSpec.IntValue RULES_TIMEOUT_SEC;
     public static final ModConfigSpec.IntValue MAX_LOGIN_ATTEMPTS;
     public static final ModConfigSpec.IntValue MIN_PASSWORD_LEN;
     public static final ModConfigSpec.IntValue MAX_PASSWORD_LEN;
@@ -84,15 +82,6 @@ public final class Config {
                 .define("use_ssl", false);
         b.pop();
 
-        b.comment("Premium / autologin settings").push("premium");
-        PREMIUM_AUTOLOGIN = b.comment("Enable Mojang session check for premium players (FastLogin behaviour).")
-                .define("autologin", true);
-        MOJANG_TIMEOUT_MS = b.comment("Timeout for Mojang API calls in milliseconds.")
-                .defineInRange("mojang_timeout_ms", 5000, 1000, 30000);
-        MOJANG_CACHE_TTL_MIN = b.comment("How many minutes to cache 'is name premium' lookups.")
-                .defineInRange("mojang_cache_ttl_min", 360, 1, 10080);
-        b.pop();
-
         b.comment("Compatibility workarounds").push("compat");
         LUCKPERMS_DEFER_TICKS = b.comment(
                 "When LuckPerms is installed as a NeoForge mod, the player-login event is delayed",
@@ -106,6 +95,10 @@ public final class Config {
         b.comment("Login flow").push("login");
         LOGIN_TIMEOUT_SEC = b.comment("Seconds before an unauthenticated player is kicked.")
                 .defineInRange("timeout_seconds", 60, 10, 600);
+        RULES_TIMEOUT_SEC = b.comment(
+                "Seconds a player gets to read and accept the server rules before being kicked.",
+                "Applies to every player who has not accepted them yet — licensed and cracked alike.")
+                .defineInRange("rules_timeout_seconds", 300, 30, 3600);
         MAX_LOGIN_ATTEMPTS = b.comment("Max wrong /login attempts before kick.")
                 .defineInRange("max_attempts", 5, 1, 20);
         MIN_PASSWORD_LEN = b.comment("Minimum password length.")

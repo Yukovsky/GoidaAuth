@@ -50,8 +50,7 @@ public abstract class PlayerDataMigrationMixin {
         try {
             String name = player.getGameProfile().getName();
             UUID real = player.getUUID();
-            UUID offline = UUID.nameUUIDFromBytes(
-                    ("OfflinePlayer:" + name).getBytes(StandardCharsets.UTF_8));
+            UUID offline = ru.goidacraft.goidaauth.auth.AuthSession.offlineUuid(name);
             if (real.equals(offline)) return; // cracked/offline join — nothing to migrate
 
             MinecraftServer server = player.server;

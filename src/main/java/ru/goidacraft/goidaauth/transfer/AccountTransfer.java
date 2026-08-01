@@ -570,6 +570,7 @@ public final class AccountTransfer {
             p.setProperty("src.username", src.username());
             p.setProperty("src.passwordHash", src.passwordHash());
             p.setProperty("src.premium", Boolean.toString(src.premium()));
+            p.setProperty("src.rulesAccepted", Boolean.toString(src.rulesAccepted()));
             if (src.lastIp() != null) p.setProperty("src.lastIp", src.lastIp());
             if (src.lastSeen() != null) p.setProperty("src.lastSeen", Long.toString(src.lastSeen().toEpochMilli()));
             if (src.registeredAt() != null) p.setProperty("src.registeredAt", Long.toString(src.registeredAt().toEpochMilli()));
@@ -608,7 +609,8 @@ public final class AccountTransfer {
                     Boolean.parseBoolean(man.getProperty("src.premium", "false")),
                     man.getProperty("src.lastIp"),
                     lastSeen,
-                    registeredAt);
+                    registeredAt,
+                    Boolean.parseBoolean(man.getProperty("src.rulesAccepted", "false")));
         } catch (Exception e) {
             LOG.warn("Could not parse source record from manifest", e);
             return null;
@@ -894,6 +896,7 @@ public final class AccountTransfer {
             p.setProperty("src.username", src.username());
             p.setProperty("src.passwordHash", src.passwordHash());
             p.setProperty("src.premium", Boolean.toString(src.premium()));
+            p.setProperty("src.rulesAccepted", Boolean.toString(src.rulesAccepted()));
             if (src.lastIp() != null) p.setProperty("src.lastIp", src.lastIp());
             if (src.lastSeen() != null) p.setProperty("src.lastSeen", Long.toString(src.lastSeen().toEpochMilli()));
             if (src.registeredAt() != null) p.setProperty("src.registeredAt", Long.toString(src.registeredAt().toEpochMilli()));

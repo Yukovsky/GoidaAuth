@@ -131,6 +131,7 @@ public final class DatabaseManager {
                 )
             """);
             ensureColumn(c, "users", "hwid", "VARCHAR(64)");
+            ensureColumn(c, "users", "rules_accepted", "BOOLEAN NOT NULL DEFAULT FALSE");
             ensureIndex(c, "users", "idx_users_name_lower", "username_lower");
             ensureIndex(c, "users", "idx_users_hwid", "hwid");
         }
@@ -269,25 +270,29 @@ public final class DatabaseManager {
         String key = name.toLowerCase(Locale.ROOT);
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(
-                "SELECT uuid, username, password_hash, premium, last_ip, last_seen, registered_at " +
-                        "FROM users WHERE username_lower = ?")) {
+                "SELECT uuid, username, password_hash, premium, last_ip, last_seen, registered_at, " +
+                        "rules_accepted FROM users WHERE username_lower = ?")) {
             ps.setString(1, key);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return Optional.empty();
                 return Optional.of(map(rs));
             }
         } catch (SQLException e) {
-            LOG.error("findByName failed", e);
-            return Optional.empty();
+            // Deliberately propagated: "the database is unreachable" is not "this account does not
+            // exist". Swallowing it into an empty Optional made a DB outage look like a brand-new
+            // player, which invites /register on an existing account. Callers fail the login instead.
+            LOG.error("findByName failed for {}", name, e);
+            throw new RuntimeException("auth database unavailable", e);
         }
     }
 
-    public CompletableFuture<Void> register(UUID uuid, String username, String passwordHash, boolean premium, String ip) {
+    public CompletableFuture<Void> register(UUID uuid, String username, String passwordHash,
+                                            boolean premium, String ip, boolean rulesAccepted) {
         return CompletableFuture.runAsync(() -> {
             try (Connection c = dataSource.getConnection();
                  PreparedStatement ps = c.prepareStatement(
-                    "INSERT INTO users (uuid, username, username_lower, password_hash, premium, last_ip, last_seen) " +
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+                    "INSERT INTO users (uuid, username, username_lower, password_hash, premium, " +
+                            "last_ip, last_seen, rules_accepted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
                 ps.setString(1, uuid.toString());
                 ps.setString(2, username);
                 ps.setString(3, username.toLowerCase(Locale.ROOT));
@@ -295,9 +300,24 @@ public final class DatabaseManager {
                 ps.setBoolean(5, premium);
                 ps.setString(6, normalizeIp(ip));
                 ps.setTimestamp(7, Timestamp.from(Instant.now()));
+                ps.setBoolean(8, rulesAccepted);
                 ps.executeUpdate();
             } catch (SQLException e) {
                 throw new RuntimeException(e);
+            }
+        }, io);
+    }
+
+    /** Persists the rules acceptance so a returning player is never asked twice. */
+    public CompletableFuture<Void> setRulesAccepted(String username) {
+        return CompletableFuture.runAsync(() -> {
+            try (Connection c = dataSource.getConnection();
+                 PreparedStatement ps = c.prepareStatement(
+                    "UPDATE users SET rules_accepted = TRUE WHERE username_lower = ?")) {
+                ps.setString(1, username.toLowerCase(Locale.ROOT));
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                LOG.warn("setRulesAccepted failed for {}", username, e);
             }
         }, io);
     }
@@ -418,8 +438,7 @@ public final class DatabaseManager {
                     if (realname == null || passwordHash == null) { skipped++; continue; }
                     if (findByNameSync(realname).isPresent()) { skipped++; continue; }
 
-                    UUID    uuid         = UUID.nameUUIDFromBytes(
-                            ("OfflinePlayer:" + realname).getBytes(StandardCharsets.UTF_8));
+                    UUID    uuid         = ru.goidacraft.goidaauth.auth.AuthSession.offlineUuid(realname);
                     Instant lastSeen     = lastloginMs > 0 ? Instant.ofEpochMilli(lastloginMs) : null;
                     Instant registeredAt = regdateMs   > 0 ? Instant.ofEpochMilli(regdateMs)   : Instant.now();
                     String  uLower       = (usernameLower != null ? usernameLower : realname)
@@ -457,12 +476,14 @@ public final class DatabaseManager {
             try (Connection c = dataSource.getConnection();
                  PreparedStatement ps = c.prepareStatement(
                     "INSERT INTO users " +
-                    "(uuid, username, username_lower, password_hash, premium, last_ip, last_seen, registered_at) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+                    "(uuid, username, username_lower, password_hash, premium, last_ip, last_seen, " +
+                    "registered_at, rules_accepted) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
                     "ON DUPLICATE KEY UPDATE username = VALUES(username), " +
                     "username_lower = VALUES(username_lower), password_hash = VALUES(password_hash), " +
                     "premium = VALUES(premium), last_ip = VALUES(last_ip), " +
-                    "last_seen = VALUES(last_seen), registered_at = VALUES(registered_at)")) {
+                    "last_seen = VALUES(last_seen), registered_at = VALUES(registered_at), " +
+                    "rules_accepted = VALUES(rules_accepted)")) {
                 ps.setString(1, r.uuid().toString());
                 ps.setString(2, r.username());
                 ps.setString(3, r.username().toLowerCase(Locale.ROOT));
@@ -471,6 +492,7 @@ public final class DatabaseManager {
                 ps.setString(6, normalizeIp(r.lastIp()));
                 ps.setTimestamp(7, r.lastSeen() == null ? null : Timestamp.from(r.lastSeen()));
                 ps.setTimestamp(8, Timestamp.from(r.registeredAt() == null ? Instant.now() : r.registeredAt()));
+                ps.setBoolean(9, r.rulesAccepted());
                 ps.executeUpdate();
             } catch (SQLException e) {
                 throw new RuntimeException(e);
@@ -578,7 +600,8 @@ public final class DatabaseManager {
                 rs.getBoolean("premium"),
                 rs.getString("last_ip"),
                 ls == null ? null : ls.toInstant(),
-                ra == null ? Instant.now() : ra.toInstant()
+                ra == null ? Instant.now() : ra.toInstant(),
+                rs.getBoolean("rules_accepted")
         );
     }
 }

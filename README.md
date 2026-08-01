@@ -26,38 +26,37 @@ Cracked players log in with a password. Premium players authenticate automatical
 
 ## How Authentication Works
 
-```
-Player connects
-│
-├─ Name exists in Mojang API?
-│   ├─ YES → mod initiates real encryption handshake → Mojang hasJoined check
-│   │             ├─ verified  → ✅ auto-login (no password needed)
-│   │             └─ failed    → ❌ kicked  (name is taken by a licensed account)
-│   │
-│   └─ NO  → player is cracked
-│                 ├─ already registered → /login <password>
-│                 └─ new player         → /register <password> <password>
-│
-└─ Session valid (same IP, not expired)? → ✅ auto-login without password prompt
-```
-
-<details>
-<summary><b>Behind a Velocity proxy with GoidaAuthVelocity</b></summary>
+Premium verification happens at the **proxy**, which is the only place where a real Mojang
+handshake is possible on an offline-mode network. The backend then proves what happened from the
+connection's UUID.
 
 ```
-Player connects to Velocity proxy
+Player connects to Velocity proxy (GoidaAuthVelocity)
 │
 ├─ DB: premium = true  → forceOnlineMode  → Mojang handshake at proxy level
-│                                             → backend receives signed textures → ✅ auto-login
-├─ DB: premium = false → forceOfflineMode → backend → /login
-└─ New player          → forceOfflineMode → backend → /register
-                          └─ (Mojang check optional, see GoidaAuthVelocity config)
+│                                             → impostor fails and is kicked at the proxy
+├─ DB: premium = false → forceOfflineMode
+└─ Unknown name        → forceOfflineMode (or online, see force-online-new-premium)
+                       ↓
+              backend (this mod)
+                       │
+   ┌───────────────────┴────────────────────┐
+   │ UUID ≠ offline UUID → Mojang-verified  │
+   └───────────────────┬────────────────────┘
+                       │
+├─ verified + DB premium      → ✅ auto-login, no password
+├─ verified + unknown name    → ✅ registered as licensed
+├─ NOT verified + DB premium  → ❌ kicked (impostor on a licensed name)
+└─ everything else            → /login <password>  ·  /register <pass> <pass>
+                                 └─ or session auto-login (same IP, not expired)
+
+then, for everyone alike → /rules → /acceptrules → play
 ```
 
-Premium verification happens **before** the player reaches your NeoForge server.  
-See [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) for setup.
-
-</details>
+**Why the UUID and not the profile properties.** Velocity assigns the real Mojang UUID after an
+online-mode handshake and the derived offline UUID (`MD5("OfflinePlayer:" + name)`) otherwise, and
+the client cannot choose which it gets. A signed `textures` property proves nothing: skin plugins
+such as SkinsRestorer attach genuine Mojang-signed textures to cracked players.
 
 ---
 
@@ -65,12 +64,13 @@ See [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) for setup
 
 |  | **Standalone** | **Behind Velocity** |
 |---|---|---|
-| Premium check | Mod calls Mojang `hasJoined` directly | Proxy handles handshake; mod trusts signed `textures` |
+| Premium check | None — every player uses a password | Proxy runs the handshake; backend verifies the forwarded UUID |
 | Database | H2 embedded · zero-config · jarJar'd | Shared MySQL / MariaDB with GoidaAuthVelocity |
 | Extra components | None | [GoidaAuthVelocity](https://github.com/Yukovsky/GoidaAuthVelocity) on the proxy |
 | Best for | Single-backend servers | Multi-backend proxy networks |
 
-Both modes are fully supported. Start standalone, migrate to proxy later by switching `database.mode` to `mysql`.
+Both modes are supported, but premium auto-login exists **only** behind the proxy. Start standalone,
+migrate later by switching `database.mode` to `mysql` and installing the proxy plugin.
 
 ---
 
@@ -78,15 +78,16 @@ Both modes are fully supported. Start standalone, migrate to proxy later by swit
 
 <table>
 <tr><th>Category</th><th>Details</th></tr>
-<tr><td><b>Premium autologin</b></td><td>Real Mojang <code>hasJoined</code> verification — same flow as FastLogin. Impostors are kicked.</td></tr>
+<tr><td><b>Premium autologin</b></td><td>Proxy-verified Mojang session, proven on the backend by the forwarded UUID. Impostors on a licensed name are kicked.</td></tr>
 <tr><td><b>Cracked registration</b></td><td><code>/register &lt;pass&gt; &lt;pass&gt;</code> and <code>/login &lt;pass&gt;</code> via Brigadier with <code>/reg</code>, <code>/l</code> aliases.</td></tr>
 <tr><td><b>Session autologin</b></td><td>Cracked players skip password on rejoin when IP matches and session is fresh (opt-in, off by default).</td></tr>
 <tr><td><b>Player lockdown</b></td><td>Freeze position, blindness, slowness 255, god mode, and full chat / command / inventory block until authenticated.</td></tr>
-<tr><td><b>Password hashing</b></td><td>Argon2id with configurable iterations, memory, and parallelism.</td></tr>
+<tr><td><b>Rules gate</b></td><td><code>/rules</code> + <code>/acceptrules</code> — the same barrier for licensed and cracked players, asked once per account and persisted.</td></tr>
+<tr><td><b>Password hashing</b></td><td>BCrypt (cost 12). Legacy PBKDF2-SHA256 hashes are verified and transparently upgraded on next login.</td></tr>
 <tr><td><b>Database</b></td><td>H2 embedded (default, bundled via jarJar) or MySQL / MariaDB for shared proxy setups.</td></tr>
 <tr><td><b>Twink protection</b></td><td>Block multi-accounting by IP or hardware fingerprint (HWID requires companion client mod).</td></tr>
 <tr><td><b>Account transfer</b></td><td><code>/transferaccount</code> — moves playerdata, stats, advancements, and sidecar files between accounts.</td></tr>
-<tr><td><b>Server rules</b></td><td><code>/rules</code> — displays configurable rule categories loaded from <code>config/rules.json</code>.</td></tr>
+<tr><td><b>Server rules</b></td><td>Configurable rule categories and links loaded from <code>config/goida_rules.json</code>.</td></tr>
 <tr><td><b>LuckPerms compat</b></td><td>Login event defer to prevent the NeoForge + LuckPerms capability race condition on join.</td></tr>
 </table>
 
@@ -103,6 +104,12 @@ Both modes are fully supported. Start standalone, migrate to proxy later by swit
 | `server.properties` | `online-mode=false` |
 
 > If `online-mode=true`, NeoForge handles Mojang auth natively — this mod is not needed.
+
+> [!IMPORTANT]
+> Behind a proxy, set `player-info-forwarding-mode = "modern"` in `velocity.toml` and firewall the
+> backend port so it is reachable only through the proxy. Modern forwarding signs the forwarded
+> profile with the shared secret; with `legacy`/`none`, or an exposed backend port, anyone can
+> connect with any username and UUID they like and no backend-side check can help.
 
 ---
 
@@ -128,13 +135,9 @@ Both modes are fully supported. Start standalone, migrate to proxy later by swit
   user = "goidaauth_rw"
   password = ""
 
-[premium]
-  autologin = true
-  mojang_timeout_ms = 5000
-  mojang_cache_ttl_min = 360   # cache "is name premium?" for 6 h
-
 [login]
   timeout_seconds = 60
+  rules_timeout_seconds = 300   # time to read and accept the rules
   max_attempts = 5
   min_password_length = 4
   max_password_length = 64
@@ -145,11 +148,6 @@ Both modes are fully supported. Start standalone, migrate to proxy later by swit
   enabled = false           # session autologin for cracked players
   timeout_minutes = 10
   require_same_ip = true
-
-[argon2]
-  iterations = 3
-  memory_kb = 65536
-  parallelism = 1
 
 [restrictions]
   blindness = true
@@ -175,10 +173,12 @@ Both modes are fully supported. Start standalone, migrate to proxy later by swit
 |---|---|---|---|
 | `/login <password>` | `/l` | Players | Authenticate with registered password |
 | `/register <pass> <pass>` | `/reg` | Players | Create a new account |
-| `/premium` | — | OP | Mark account as premium (next login will be forced online) |
-| `/unpremium` | — | OP | Revert to cracked mode |
+| `/rules` · `/acceptrules` | — | Players | Read the rules and accept them (required once per account) |
+| `/premium [confirm]` | — | Players · OP | Self-service, or `/premium <player>` for OP — marks the account licensed |
+| `/unpremium [confirm]` | — | Players · OP | Revert to cracked mode; playerdata is carried back to the offline UUID |
+| `/setpassword <player> <pass>` | — | OP | Set a password for an account that has none |
 | `/transferaccount <from> <to>` | — | OP | Move playerdata between two account names |
-| `/rules` | — | Players | Show server rules |
+| `/account <player>` · `/accountip` · `/multiaccounts` | — | OP | Look up accounts sharing an IP |
 
 **Permission nodes** (PermissionAPI-compatible):
 

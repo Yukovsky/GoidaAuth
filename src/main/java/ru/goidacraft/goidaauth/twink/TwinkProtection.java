@@ -48,15 +48,27 @@ public final class TwinkProtection {
     // Payload handler (registered in GoidaAuth via RegisterPayloadHandlersEvent)
     // ------------------------------------------------------------------
 
+    /**
+     * Caches the fingerprint for this connection only. It is deliberately <b>not</b> written to the
+     * account yet: the packet arrives long before the password does, so persisting here would let
+     * anyone who merely connects to someone else's nickname overwrite that account's stored
+     * fingerprint. {@link #persistHwid} commits it once the player is actually authorized.
+     */
     public static void handleHwidPayload(HwidPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> {
             if (!(context.player() instanceof ServerPlayer player)) return;
             String hwid = payload.hwid();
             if (hwid == null || hwid.isBlank() || hwid.length() > 64) return;
             sessionHwids.put(player.getUUID(), hwid);
-            GoidaAuth.get().database().updateHwid(player.getGameProfile().getName(), hwid);
             GoidaAuth.LOGGER.debug("HWID received for {}", player.getGameProfile().getName());
         });
+    }
+
+    /** Writes the connection's fingerprint to the account. Called only after authorization. */
+    public static void persistHwid(ServerPlayer player) {
+        String hwid = sessionHwids.get(player.getUUID());
+        if (hwid == null || hwid.isBlank()) return;
+        GoidaAuth.get().database().updateHwid(player.getGameProfile().getName(), hwid);
     }
 
     // ------------------------------------------------------------------
