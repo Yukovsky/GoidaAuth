@@ -85,6 +85,7 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
 <tr><td><b>Rules gate</b></td><td><code>/rules</code> + <code>/acceptrules</code> — the same barrier for licensed and cracked players, asked once per account and persisted.</td></tr>
 <tr><td><b>Password hashing</b></td><td>BCrypt (cost 12). Legacy PBKDF2-SHA256 hashes are verified and transparently upgraded on next login.</td></tr>
 <tr><td><b>Brute-force limit</b></td><td>Per-IP block on repeated wrong passwords that survives reconnects; keyed by address, not account, so nobody can lock a player out of their own account.</td></tr>
+<tr><td><b>Attempt audit</b></td><td><code>/attempts</code> — failed logins recorded in their own table with account, address, UUID and reason, so staff can spot someone probing other people's accounts.</td></tr>
 <tr><td><b>Database</b></td><td>H2 embedded (default, bundled via jarJar) or MySQL / MariaDB for shared proxy setups.</td></tr>
 <tr><td><b>Twink protection</b></td><td>Block multi-accounting by IP or hardware fingerprint (HWID requires companion client mod).</td></tr>
 <tr><td><b>Account transfer</b></td><td><code>/transferaccount</code> — moves playerdata, stats, advancements, and sidecar files between accounts.</td></tr>
@@ -142,7 +143,8 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
   max_attempts = 5              # wrong /login attempts per connection
   ip_block_after_attempts = 10  # wrong attempts per IP — survives reconnects
   ip_block_seconds = 600        # block duration, and how long a failure is remembered
-  min_password_length = 4
+  attempt_retention_days = 30   # how long failed attempts are kept for /attempts
+  min_password_length = 6
   max_password_length = 64
   register_confirm_required = true
   allowed_commands = ["login", "l", "register", "reg", "help"]
@@ -182,6 +184,7 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
 | `/setpassword <player> <pass>` | — | OP | Set a password for an account that has none |
 | `/transferaccount <from> <to>` | — | OP | Move playerdata between two account names |
 | `/account <player>` · `/accountip` · `/multiaccounts` | — | OP | Look up accounts sharing an IP |
+| `/attempts [recent\|player <name>\|ip <addr>] [limit]` | — | OP | Review **failed** login attempts — who tried to get into an account and did not succeed |
 
 ### Console-only commands
 
@@ -193,6 +196,7 @@ administrator without shell access cannot use them to cover tracks.
 |---|---|
 | `/goidaauth forget <holder> <target>` | Clears `last_ip` + `hwid` of **`target`**, so it stops appearing in `holder`'s shared-IP report. Only `target` is touched, so the argument order matters. |
 | `/goidaauth forget <holder> ip <address>` | Same, applied to every account on that address except `holder`. |
+| `/goidaauth attempts clear player <name>` · `ip <address>` | Deletes recorded failed login attempts. An OP who did the probing must not be able to erase the record of it. |
 
 Both print what will be cleared and require an explicit `confirm` as the last argument. Note this
 clears *history*, it does not suppress future linkage: `last_ip` is written again the next time the

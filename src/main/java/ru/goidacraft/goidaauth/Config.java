@@ -23,6 +23,7 @@ public final class Config {
     public static final ModConfigSpec.IntValue MAX_LOGIN_ATTEMPTS;
     public static final ModConfigSpec.IntValue IP_BLOCK_AFTER_ATTEMPTS;
     public static final ModConfigSpec.IntValue IP_BLOCK_SECONDS;
+    public static final ModConfigSpec.IntValue ATTEMPT_RETENTION_DAYS;
     public static final ModConfigSpec.IntValue MIN_PASSWORD_LEN;
     public static final ModConfigSpec.IntValue MAX_PASSWORD_LEN;
     public static final ModConfigSpec.BooleanValue REGISTER_CONFIRM_REQUIRED;
@@ -114,8 +115,14 @@ public final class Config {
                 "How long a blocked IP has to wait. This is also the memory window: failures older",
                 "than this are forgotten, so occasional typos never accumulate into a block.")
                 .defineInRange("ip_block_seconds", 600, 10, 86400);
-        MIN_PASSWORD_LEN = b.comment("Minimum password length.")
-                .defineInRange("min_password_length", 4, 1, 64);
+        ATTEMPT_RETENTION_DAYS = b.comment(
+                "How many days of failed login attempts to keep for the /attempts report.",
+                "Older rows are deleted on server start so the table cannot grow without bound.")
+                .defineInRange("attempt_retention_days", 30, 1, 3650);
+        MIN_PASSWORD_LEN = b.comment("Minimum password length.",
+                        "NOTE: this default only applies to a freshly generated config. An existing",
+                        "goidaauth-common.toml keeps whatever value it already has — raise it there too.")
+                .defineInRange("min_password_length", 6, 1, 64);
         MAX_PASSWORD_LEN = b.comment("Maximum password length.")
                 .defineInRange("max_password_length", 64, 8, 256);
         REGISTER_CONFIRM_REQUIRED = b.comment("Require /register <pass> <pass>. If false, /register <pass> is allowed.")

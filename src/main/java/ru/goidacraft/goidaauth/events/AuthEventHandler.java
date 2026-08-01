@@ -28,6 +28,7 @@ import ru.goidacraft.goidaauth.auth.LoginDecision;
 import ru.goidacraft.goidaauth.commands.AuthCommands;
 import ru.goidacraft.goidaauth.compat.LuckPermsLoginGate;
 import ru.goidacraft.goidaauth.database.DatabaseManager;
+import ru.goidacraft.goidaauth.database.LoginAttempt;
 import ru.goidacraft.goidaauth.database.UserRecord;
 
 import ru.goidacraft.goidaauth.twink.TwinkProtection;
@@ -116,6 +117,8 @@ public final class AuthEventHandler {
                 // A licensed name arriving over an offline connection: an impostor, or the proxy
                 // routed offline because the shared DB was briefly unreachable. Either way the
                 // account is not handed out — the owner reconnects and is routed online.
+                GoidaAuth.get().database().recordFailedAttempt(username, player.getIpAddress(),
+                        player.getUUID(), LoginAttempt.PREMIUM_IMPOSTOR);
                 player.connection.disconnect(Component.literal(Config.MSG_PREMIUM_KICK.get()));
                 return;
             }

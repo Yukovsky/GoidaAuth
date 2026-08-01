@@ -907,6 +907,8 @@ public final class AuthCommands {
                     // stored IP/last_seen must only ever describe the real owner's logins.
                     int fails = session.incrementFailures();
                     long blocked = THROTTLE.recordFailure(ip, System.currentTimeMillis(), throttlePolicy());
+                    db.recordFailedAttempt(username, ip, player.getUUID(),
+                            ru.goidacraft.goidaauth.database.LoginAttempt.WRONG_PASSWORD);
                     ru.goidacraft.goidaauth.GoidaAuth.LOGGER.warn(
                             "Failed /login for '{}' from {} (attempt {}/{}{})",
                             username, ip, fails, Config.MAX_LOGIN_ATTEMPTS.get(),

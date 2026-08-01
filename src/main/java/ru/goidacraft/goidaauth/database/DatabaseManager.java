@@ -67,6 +67,7 @@ public final class DatabaseManager {
         if (mysql) {
             maybeImportFromH2(server);
         }
+        purgeOldAttempts(Config.ATTEMPT_RETENTION_DAYS.get());
         LOG.info("GoidaAuth DB ready (mode={})", mysql ? "mysql" : "h2");
     }
 
@@ -134,6 +135,22 @@ public final class DatabaseManager {
             ensureColumn(c, "users", "rules_accepted", "BOOLEAN NOT NULL DEFAULT FALSE");
             ensureIndex(c, "users", "idx_users_name_lower", "username_lower");
             ensureIndex(c, "users", "idx_users_hwid", "hwid");
+
+            // Failed attempts live in their own table: they describe the person who tried, not the
+            // account they aimed at, so they must never touch the account's own columns.
+            st.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    username VARCHAR(32) NOT NULL,
+                    username_lower VARCHAR(32) NOT NULL,
+                    ip VARCHAR(64),
+                    uuid VARCHAR(36),
+                    reason VARCHAR(32) NOT NULL,
+                    attempted_at TIMESTAMP NOT NULL
+                )
+            """);
+            ensureIndex(c, "login_attempts", "idx_attempts_name", "username_lower");
+            ensureIndex(c, "login_attempts", "idx_attempts_ip", "ip");
+            ensureIndex(c, "login_attempts", "idx_attempts_at", "attempted_at");
         }
     }
 
@@ -599,6 +616,110 @@ public final class DatabaseManager {
                 return false;
             }
         }, io);
+    }
+
+    // ------------------------------------------------------------------
+    // Failed login attempts
+    // ------------------------------------------------------------------
+
+    /**
+     * Records a failed attempt. Fire-and-forget: an audit write must never delay or fail a login,
+     * so errors are logged and swallowed.
+     */
+    public void recordFailedAttempt(String username, String ip, UUID uuid, String reason) {
+        CompletableFuture.runAsync(() -> {
+            try (Connection c = dataSource.getConnection();
+                 PreparedStatement ps = c.prepareStatement(
+                    "INSERT INTO login_attempts (username, username_lower, ip, uuid, reason, attempted_at) " +
+                            "VALUES (?, ?, ?, ?, ?, ?)")) {
+                ps.setString(1, username);
+                ps.setString(2, username.toLowerCase(Locale.ROOT));
+                ps.setString(3, normalizeIp(ip));
+                ps.setString(4, uuid == null ? null : uuid.toString());
+                ps.setString(5, reason);
+                ps.setTimestamp(6, Timestamp.from(Instant.now()));
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                LOG.warn("recordFailedAttempt failed for {}", username, e);
+            }
+        }, io);
+    }
+
+    /** Attempts aimed at one account — who tried to get in here. */
+    public CompletableFuture<List<LoginAttempt>> findAttemptsByAccount(String username, int limit) {
+        return queryAttempts("WHERE username_lower = ?", username.toLowerCase(Locale.ROOT), limit);
+    }
+
+    /** Attempts made from one address — which accounts this address went after. */
+    public CompletableFuture<List<LoginAttempt>> findAttemptsByIp(String ip, int limit) {
+        return queryAttempts("WHERE ip = ?", normalizeIp(ip), limit);
+    }
+
+    /** The latest attempts server-wide. */
+    public CompletableFuture<List<LoginAttempt>> findRecentAttempts(int limit) {
+        return queryAttempts("", null, limit);
+    }
+
+    private CompletableFuture<List<LoginAttempt>> queryAttempts(String where, String arg, int limit) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection c = dataSource.getConnection();
+                 PreparedStatement ps = c.prepareStatement(
+                    "SELECT username, ip, uuid, reason, attempted_at FROM login_attempts "
+                            + where + " ORDER BY attempted_at DESC LIMIT ?")) {
+                int i = 1;
+                if (arg != null) ps.setString(i++, arg);
+                ps.setInt(i, Math.max(1, limit));
+                try (ResultSet rs = ps.executeQuery()) {
+                    List<LoginAttempt> out = new ArrayList<>();
+                    while (rs.next()) {
+                        Timestamp at = rs.getTimestamp("attempted_at");
+                        out.add(new LoginAttempt(
+                                rs.getString("username"),
+                                rs.getString("ip"),
+                                rs.getString("uuid"),
+                                rs.getString("reason"),
+                                at == null ? null : at.toInstant()));
+                    }
+                    return out;
+                }
+            } catch (SQLException e) {
+                LOG.warn("queryAttempts failed", e);
+                return List.<LoginAttempt>of();
+            }
+        }, io);
+    }
+
+    /** Deletes recorded attempts for one account or one address. Console-only by policy. */
+    public CompletableFuture<Integer> clearAttempts(boolean byIp, String value) {
+        return CompletableFuture.supplyAsync(() -> {
+            String sql = byIp
+                    ? "DELETE FROM login_attempts WHERE ip = ?"
+                    : "DELETE FROM login_attempts WHERE username_lower = ?";
+            String arg = byIp ? normalizeIp(value) : value.toLowerCase(Locale.ROOT);
+            try (Connection c = dataSource.getConnection();
+                 PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, arg);
+                int rows = ps.executeUpdate();
+                LOG.info("clearAttempts: removed {} rows for {}={}", rows, byIp ? "ip" : "account", arg);
+                return rows;
+            } catch (SQLException e) {
+                LOG.warn("clearAttempts failed for {}", value, e);
+                return 0;
+            }
+        }, io);
+    }
+
+    /** Drops attempts older than the retention window. Runs once at startup. */
+    private void purgeOldAttempts(int days) {
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM login_attempts WHERE attempted_at < ?")) {
+            ps.setTimestamp(1, Timestamp.from(Instant.now().minus(java.time.Duration.ofDays(days))));
+            int rows = ps.executeUpdate();
+            if (rows > 0) LOG.info("Purged {} login attempts older than {} days", rows, days);
+        } catch (SQLException e) {
+            LOG.warn("purgeOldAttempts failed", e);
+        }
     }
 
     public CompletableFuture<Void> updatePassword(String username, String newHash) {

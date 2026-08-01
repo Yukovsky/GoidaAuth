@@ -49,7 +49,57 @@ public final class ConsoleCommands {
                                         .then(Commands.argument("address", StringArgumentType.word())
                                                 .executes(ctx -> forgetIp(ctx, db, false))
                                                 .then(Commands.literal("confirm")
-                                                        .executes(ctx -> forgetIp(ctx, db, true))))))));
+                                                        .executes(ctx -> forgetIp(ctx, db, true)))))))
+                // /goidaauth attempts clear player|ip <значение> [confirm]
+                .then(Commands.literal("attempts")
+                        .then(Commands.literal("clear")
+                                .then(Commands.literal("player")
+                                        .then(Commands.argument("player", StringArgumentType.word())
+                                                .executes(ctx -> clearAttempts(ctx, db, false, "player", false))
+                                                .then(Commands.literal("confirm")
+                                                        .executes(ctx -> clearAttempts(ctx, db, false, "player", true)))))
+                                .then(Commands.literal("ip")
+                                        .then(Commands.argument("address", StringArgumentType.word())
+                                                .executes(ctx -> clearAttempts(ctx, db, true, "address", false))
+                                                .then(Commands.literal("confirm")
+                                                        .executes(ctx -> clearAttempts(ctx, db, true, "address", true))))))));
+    }
+
+    /**
+     * Deletes recorded failed attempts. Console-only for the same reason as {@code forget}: this is
+     * the record of someone probing other people's accounts, and an OP who did the probing must not
+     * be able to erase it.
+     */
+    private static int clearAttempts(CommandContext<CommandSourceStack> ctx, DatabaseManager db,
+                                     boolean byIp, String argName, boolean confirmed) {
+        String value = StringArgumentType.getString(ctx, argName);
+        var source = ctx.getSource();
+        var server = source.getServer();
+
+        var lookup = byIp ? db.findAttemptsByIp(value, 200) : db.findAttemptsByAccount(value, 200);
+        lookup.thenAccept(list -> server.execute(() -> {
+            if (list.isEmpty()) {
+                source.sendSuccess(() -> Component.literal(
+                        "§eЗаписей о неудачных попытках для §f" + value + "§e нет."), false);
+                return;
+            }
+            if (!confirmed) {
+                source.sendSuccess(() -> Component.literal(
+                        "§eБудет удалено записей: §f" + list.size()
+                        + "§e (" + (byIp ? "адрес" : "аккаунт") + " §f" + value + "§e)."), false);
+                source.sendSuccess(() -> Component.literal(
+                        "§7Подтвердите: §f/goidaauth attempts clear " + (byIp ? "ip " : "player ")
+                        + value + " confirm"), false);
+                return;
+            }
+            db.clearAttempts(byIp, value).thenAccept(rows -> server.execute(() -> {
+                GoidaAuth.LOGGER.info("CONSOLE: cleared {} login attempts for {}={}",
+                        rows, byIp ? "ip" : "account", value);
+                source.sendSuccess(() -> Component.literal(
+                        "§aУдалено записей: §f" + rows + "§a."), true);
+            }));
+        }));
+        return 1;
     }
 
     private static boolean isConsole(CommandSourceStack src) {
