@@ -84,6 +84,7 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
 <tr><td><b>Player lockdown</b></td><td>Freeze position, blindness, slowness 255, god mode, and full chat / command / inventory block until authenticated.</td></tr>
 <tr><td><b>Rules gate</b></td><td><code>/rules</code> + <code>/acceptrules</code> — the same barrier for licensed and cracked players, asked once per account and persisted.</td></tr>
 <tr><td><b>Password hashing</b></td><td>BCrypt (cost 12). Legacy PBKDF2-SHA256 hashes are verified and transparently upgraded on next login.</td></tr>
+<tr><td><b>Brute-force limit</b></td><td>Per-IP block on repeated wrong passwords that survives reconnects; keyed by address, not account, so nobody can lock a player out of their own account.</td></tr>
 <tr><td><b>Database</b></td><td>H2 embedded (default, bundled via jarJar) or MySQL / MariaDB for shared proxy setups.</td></tr>
 <tr><td><b>Twink protection</b></td><td>Block multi-accounting by IP or hardware fingerprint (HWID requires companion client mod).</td></tr>
 <tr><td><b>Account transfer</b></td><td><code>/transferaccount</code> — moves playerdata, stats, advancements, and sidecar files between accounts.</td></tr>
@@ -138,7 +139,9 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
 [login]
   timeout_seconds = 60
   rules_timeout_seconds = 300   # time to read and accept the rules
-  max_attempts = 5
+  max_attempts = 5              # wrong /login attempts per connection
+  ip_block_after_attempts = 10  # wrong attempts per IP — survives reconnects
+  ip_block_seconds = 600        # block duration, and how long a failure is remembered
   min_password_length = 4
   max_password_length = 64
   register_confirm_required = true

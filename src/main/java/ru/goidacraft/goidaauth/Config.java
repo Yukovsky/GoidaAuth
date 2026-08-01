@@ -21,6 +21,8 @@ public final class Config {
     public static final ModConfigSpec.IntValue LOGIN_TIMEOUT_SEC;
     public static final ModConfigSpec.IntValue RULES_TIMEOUT_SEC;
     public static final ModConfigSpec.IntValue MAX_LOGIN_ATTEMPTS;
+    public static final ModConfigSpec.IntValue IP_BLOCK_AFTER_ATTEMPTS;
+    public static final ModConfigSpec.IntValue IP_BLOCK_SECONDS;
     public static final ModConfigSpec.IntValue MIN_PASSWORD_LEN;
     public static final ModConfigSpec.IntValue MAX_PASSWORD_LEN;
     public static final ModConfigSpec.BooleanValue REGISTER_CONFIRM_REQUIRED;
@@ -99,8 +101,19 @@ public final class Config {
                 "Seconds a player gets to read and accept the server rules before being kicked.",
                 "Applies to every player who has not accepted them yet — licensed and cracked alike.")
                 .defineInRange("rules_timeout_seconds", 300, 30, 3600);
-        MAX_LOGIN_ATTEMPTS = b.comment("Max wrong /login attempts before kick.")
+        MAX_LOGIN_ATTEMPTS = b.comment("Max wrong /login attempts before kick.",
+                        "Per connection — reconnecting starts a fresh count, so this alone does not",
+                        "bound brute force. See ip_block_after_attempts below.")
                 .defineInRange("max_attempts", 5, 1, 20);
+        IP_BLOCK_AFTER_ATTEMPTS = b.comment(
+                "Wrong /login attempts from one IP address before that address is temporarily",
+                "blocked. Unlike max_attempts this survives reconnects, which is what actually",
+                "limits password guessing.")
+                .defineInRange("ip_block_after_attempts", 10, 1, 100);
+        IP_BLOCK_SECONDS = b.comment(
+                "How long a blocked IP has to wait. This is also the memory window: failures older",
+                "than this are forgotten, so occasional typos never accumulate into a block.")
+                .defineInRange("ip_block_seconds", 600, 10, 86400);
         MIN_PASSWORD_LEN = b.comment("Minimum password length.")
                 .defineInRange("min_password_length", 4, 1, 64);
         MAX_PASSWORD_LEN = b.comment("Maximum password length.")

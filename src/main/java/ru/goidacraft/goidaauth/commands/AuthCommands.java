@@ -34,6 +34,15 @@ import java.util.stream.Stream;
 public final class AuthCommands {
     private AuthCommands() {}
 
+    /** Per-IP brute-force limit; outlives connections, unlike the per-session failure counter. */
+    private static final ru.goidacraft.goidaauth.auth.LoginThrottle THROTTLE =
+            new ru.goidacraft.goidaauth.auth.LoginThrottle();
+
+    private static ru.goidacraft.goidaauth.auth.LoginThrottle.Policy throttlePolicy() {
+        return new ru.goidacraft.goidaauth.auth.LoginThrottle.Policy(
+                Config.IP_BLOCK_AFTER_ATTEMPTS.get(), Config.IP_BLOCK_SECONDS.get() * 1000L);
+    }
+
     public static void register(CommandDispatcher<CommandSourceStack> d, DatabaseManager db,
                                 PasswordHasher hasher, AuthSessionManager sessions) {
         registerLogin(d, "login", db, hasher, sessions);
@@ -865,6 +874,15 @@ public final class AuthCommands {
         }
 
         String username = player.getGameProfile().getName();
+        String ip = DatabaseManager.normalizeIp(player.getIpAddress());
+
+        // Refuse before hashing: a blocked address must cost us nothing to turn away.
+        long blockedFor = THROTTLE.blockedSecondsLeft(ip, System.currentTimeMillis());
+        if (blockedFor > 0) {
+            send(player, "§cСлишком много неудачных попыток. Повторите через §f"
+                    + blockedFor + "§c сек.");
+            return 0;
+        }
 
         db.findByName(username).thenAccept(opt -> {
             if (opt.isEmpty()) {
@@ -888,17 +906,23 @@ public final class AuthCommands {
                     // Nothing about this connection is written to the account on a failure — the
                     // stored IP/last_seen must only ever describe the real owner's logins.
                     int fails = session.incrementFailures();
+                    long blocked = THROTTLE.recordFailure(ip, System.currentTimeMillis(), throttlePolicy());
                     ru.goidacraft.goidaauth.GoidaAuth.LOGGER.warn(
-                            "Failed /login for '{}' from {} (attempt {}/{})",
-                            username, DatabaseManager.normalizeIp(player.getIpAddress()),
-                            fails, Config.MAX_LOGIN_ATTEMPTS.get());
-                    if (fails >= Config.MAX_LOGIN_ATTEMPTS.get()) {
+                            "Failed /login for '{}' from {} (attempt {}/{}{})",
+                            username, ip, fails, Config.MAX_LOGIN_ATTEMPTS.get(),
+                            blocked > 0 ? ", IP blocked for " + blocked + "s" : "");
+                    if (blocked > 0) {
+                        player.connection.disconnect(Component.literal(
+                                "Слишком много неудачных попыток входа.\nПовторите через "
+                                + (blocked / 60 + 1) + " мин."));
+                    } else if (fails >= Config.MAX_LOGIN_ATTEMPTS.get()) {
                         player.connection.disconnect(Component.literal(Config.MSG_LOGIN_FAIL.get()));
                     } else {
                         send(player, Config.MSG_LOGIN_FAIL.get());
                     }
                     return;
                 }
+                THROTTLE.clear(ip); // the owner made it in — a past bad streak is not held against them
                 session.setRegistered(true);
                 db.updateLastSeen(username, player.getIpAddress());
                 send(player, Config.MSG_LOGIN_SUCCESS.get());
