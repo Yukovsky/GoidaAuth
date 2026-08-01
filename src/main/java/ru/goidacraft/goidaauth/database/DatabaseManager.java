@@ -576,6 +576,31 @@ public final class DatabaseManager {
         }, io);
     }
 
+    /**
+     * Drops the account-linkage data (last IP and hardware fingerprint) for one account, so it stops
+     * showing up in the shared-IP report and in the anti-twink check.
+     *
+     * <p>Note this is not permanent by itself: both fields are written again the next time the
+     * account logs in successfully. It clears history, it does not suppress future linkage.
+     *
+     * @return true if a row was actually updated
+     */
+    public CompletableFuture<Boolean> clearLinkage(String username) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Connection c = dataSource.getConnection();
+                 PreparedStatement ps = c.prepareStatement(
+                    "UPDATE users SET last_ip = NULL, hwid = NULL WHERE username_lower = ?")) {
+                ps.setString(1, username.toLowerCase(Locale.ROOT));
+                boolean changed = ps.executeUpdate() > 0;
+                if (changed) LOG.info("clearLinkage: wiped last_ip and hwid for '{}'", username);
+                return changed;
+            } catch (SQLException e) {
+                LOG.warn("clearLinkage failed for {}", username, e);
+                return false;
+            }
+        }, io);
+    }
+
     public CompletableFuture<Void> updatePassword(String username, String newHash) {
         return CompletableFuture.runAsync(() -> {
             try (Connection c = dataSource.getConnection();

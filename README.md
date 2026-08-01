@@ -180,6 +180,21 @@ migrate later by switching `database.mode` to `mysql` and installing the proxy p
 | `/transferaccount <from> <to>` | — | OP | Move playerdata between two account names |
 | `/account <player>` · `/accountip` · `/multiaccounts` | — | OP | Look up accounts sharing an IP |
 
+### Console-only commands
+
+Reachable **only from the server console** — not from an operator, a command block, a function or
+RCON. These erase account-linkage evidence, so they are deliberately kept away from OP: an
+administrator without shell access cannot use them to cover tracks.
+
+| Command | Description |
+|---|---|
+| `/goidaauth forget <holder> <target>` | Clears `last_ip` + `hwid` of **`target`**, so it stops appearing in `holder`'s shared-IP report. Only `target` is touched, so the argument order matters. |
+| `/goidaauth forget <holder> ip <address>` | Same, applied to every account on that address except `holder`. |
+
+Both print what will be cleared and require an explicit `confirm` as the last argument. Note this
+clears *history*, it does not suppress future linkage: `last_ip` is written again the next time the
+account logs in successfully.
+
 **Permission nodes** (PermissionAPI-compatible):
 
 | Node | Default |

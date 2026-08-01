@@ -103,6 +103,7 @@ public final class GoidaAuth {
 
     private void onRegisterCommands(RegisterCommandsEvent event) {
         AuthCommands.register(event.getDispatcher(), database, hasher, sessions);
+        ru.goidacraft.goidaauth.commands.ConsoleCommands.register(event.getDispatcher(), database);
         new RulesCommand(rulesConfig).register(event.getDispatcher());
     }
 
