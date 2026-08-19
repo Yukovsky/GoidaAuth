@@ -27,6 +27,7 @@ public final class Config {
     public static final ModConfigSpec.IntValue MIN_PASSWORD_LEN;
     public static final ModConfigSpec.IntValue MAX_PASSWORD_LEN;
     public static final ModConfigSpec.BooleanValue REGISTER_CONFIRM_REQUIRED;
+    public static final ModConfigSpec.BooleanValue PRE_REGISTER_PREMIUM_ENABLED;
     public static final ModConfigSpec.BooleanValue SESSION_ENABLED;
     public static final ModConfigSpec.IntValue SESSION_TIMEOUT_MIN;
     public static final ModConfigSpec.BooleanValue SESSION_REQUIRE_SAME_IP;
@@ -130,8 +131,18 @@ public final class Config {
                 .defineInRange("max_password_length", 64, 8, 256);
         REGISTER_CONFIRM_REQUIRED = b.comment("Require /register <pass> <pass>. If false, /register <pass> is allowed.")
                 .define("register_confirm_required", true);
+        PRE_REGISTER_PREMIUM_ENABLED = b.comment(
+                "Let a brand-new player (no DB row yet) run /premium instead of /register, so a",
+                "licensed Mojang owner can skip setting a password entirely. Only ever available",
+                "before any account row exists for that name — the moment a row exists (registered",
+                "cracked, or already premium), /premium always falls back to the normal login-first",
+                "gate, regardless of this setting. Rules must still be accepted first, same as /register.")
+                .define("pre_register_premium_enabled", true);
         ALLOWED_COMMANDS = b.comment("Commands a non-authenticated player can still execute (without leading slash).",
-                        "Note: /premium and /unpremium are intentionally NOT here — they require login first.")
+                        "Note: /unpremium is intentionally NOT here — it requires login first.",
+                        "/premium IS reachable before login, but only does anything for an unregistered",
+                        "account (see pre_register_premium_enabled above); otherwise it is refused the",
+                        "same as if it weren't in this list.")
                 .defineList("allowed_commands",
                         List.of("login", "l", "register", "reg", "help"),
                         () -> "",

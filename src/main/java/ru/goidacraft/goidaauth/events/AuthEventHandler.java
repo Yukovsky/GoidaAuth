@@ -270,10 +270,13 @@ public final class AuthEventHandler {
             root = space < 0 ? raw : raw.substring(0, space);
         }
 
-        // Auth commands must always pass through for unauthenticated players
+        // Auth commands must always pass through for unauthenticated players. /premium is included
+        // so a brand-new (unregistered) player can use it instead of /register — AuthCommands itself
+        // still refuses it for anyone whose account already has a DB row (see premiumMode()).
         if (root.equalsIgnoreCase("login") || root.equalsIgnoreCase("l") ||
                 root.equalsIgnoreCase("register") || root.equalsIgnoreCase("reg") ||
-                root.equalsIgnoreCase("rules") || root.equalsIgnoreCase("acceptrules")) return;
+                root.equalsIgnoreCase("rules") || root.equalsIgnoreCase("acceptrules") ||
+                root.equalsIgnoreCase("premium")) return;
 
         for (String allowed : Config.ALLOWED_COMMANDS.get()) {
             if (allowed.equalsIgnoreCase(root)) return;

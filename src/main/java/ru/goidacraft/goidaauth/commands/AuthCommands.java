@@ -80,7 +80,7 @@ public final class AuthCommands {
                                          DatabaseManager db, PasswordHasher hasher, AuthSessionManager sessions) {
         d.register(LiteralArgumentBuilder.<CommandSourceStack>literal(name)
                 .requires(src -> true)
-                .executes(ctx -> handleRegisterUsage(ctx))
+                .executes(ctx -> handleRegisterUsage(ctx, sessions))
                 .then(Commands.argument("password", StringArgumentType.word())
                         .executes(ctx -> handleRegisterSingle(ctx, db, hasher, sessions))
                         .then(Commands.argument("confirm", StringArgumentType.word())
@@ -91,7 +91,11 @@ public final class AuthCommands {
                                         DatabaseManager db, AuthSessionManager sessions) {
         d.register(LiteralArgumentBuilder.<CommandSourceStack>literal(name)
                 .requires(src -> true)
-                // Player self-service: /premium → warning, /premium confirm → apply.
+                // Player self-service, two flavors depending on session state — see premiumMode():
+                //  AUTHORIZED   → already playing on a cracked/session account, opts into premium.
+                //  PRE_REGISTER → brand-new name, no DB row yet: /premium replaces /register entirely.
+                //  BLOCKED      → an account row already exists and this session hasn't proven it
+                //                 owns it (mid password login) — refused no matter what, config or not.
                 .executes(ctx -> handlePremiumSelfPrompt(ctx, sessions))
                 .then(Commands.literal("confirm")
                         .executes(ctx -> handlePremiumSelfConfirm(ctx, db, sessions)))
@@ -236,18 +240,28 @@ public final class AuthCommands {
         return handleLoginForPlayer(player, password, db, hasher, sessions);
     }
 
-    private static int handleRegisterUsage(CommandContext<CommandSourceStack> ctx) {
+    private static int handleRegisterUsage(CommandContext<CommandSourceStack> ctx, AuthSessionManager sessions) {
         ServerPlayer player = sourcePlayer(ctx);
         if (player == null) return 0;
-        send(player, Config.MSG_REGISTER_PROMPT.get());
+        AuthSession session = sessions.get(player.getUUID()).orElse(null);
+        boolean mentionPremium = session != null && !session.isAuthorized() && !session.isRegistered();
+        sendRegisterPrompt(player, mentionPremium);
         return 0;
+    }
+
+    /** {@code MSG_REGISTER_PROMPT}, plus a hint about the /premium shortcut when it actually applies. */
+    private static void sendRegisterPrompt(ServerPlayer player, boolean mentionPremium) {
+        send(player, Config.MSG_REGISTER_PROMPT.get());
+        if (mentionPremium && Config.PRE_REGISTER_PREMIUM_ENABLED.get()) {
+            send(player, "§7Лицензионный аккаунт Mojang? Введите §a/premium §7вместо регистрации.");
+        }
     }
 
     private static int handleRegisterSingle(CommandContext<CommandSourceStack> ctx,
                                             DatabaseManager db, PasswordHasher hasher,
                                             AuthSessionManager sessions) {
         if (Config.REGISTER_CONFIRM_REQUIRED.get()) {
-            return handleRegisterUsage(ctx);
+            return handleRegisterUsage(ctx, sessions);
         }
         String password = StringArgumentType.getString(ctx, "password");
         return handleRegisterWithConfirm(ctx, db, hasher, sessions, password, password);
@@ -298,9 +312,32 @@ public final class AuthCommands {
     private static final ConcurrentHashMap<UUID, Long> PENDING_UNPREMIUM = new ConcurrentHashMap<>();
     private static final long CONFIRM_TTL_MS = 60_000L;
 
+    /** Which flavor of self-service /premium applies to this session right now. */
+    private enum PremiumMode {
+        /** Already playing (cracked login/register/session auto-login) — opting into premium. */
+        AUTHORIZED,
+        /** No DB row for this name at all yet — /premium can stand in for /register. */
+        PRE_REGISTER,
+        /**
+         * A DB row already exists for this name and this session hasn't proven it owns it (still
+         * mid password login). Refused unconditionally — never gated by config, since this is the
+         * exact case where letting /premium through would hand an attacker someone else's account.
+         */
+        BLOCKED
+    }
+
+    private static PremiumMode premiumMode(ServerPlayer player, AuthSessionManager sessions) {
+        if (sessions.isAuthorized(player.getUUID())) return PremiumMode.AUTHORIZED;
+        AuthSession session = sessions.get(player.getUUID()).orElse(null);
+        if (session != null && !session.isRegistered() && Config.PRE_REGISTER_PREMIUM_ENABLED.get()) {
+            return PremiumMode.PRE_REGISTER;
+        }
+        return PremiumMode.BLOCKED;
+    }
+
+    /** /unpremium is unchanged: still requires a fully authorized (password-proven) session. */
     private static boolean requireAuthorized(ServerPlayer player, AuthSessionManager sessions) {
         if (sessions.isAuthorized(player.getUUID())) return true;
-        // Gate: self-service premium toggles are only available after /login or /register.
         send(player, Config.MSG_BLOCKED_ACTION.get());
         return false;
     }
@@ -314,8 +351,16 @@ public final class AuthCommands {
                                                AuthSessionManager sessions) {
         ServerPlayer player = sourcePlayer(ctx);
         if (player == null) return 0; // console must use /premium <player>
-        if (!requireAuthorized(player, sessions)) return 0;
 
+        switch (premiumMode(player, sessions)) {
+            case AUTHORIZED -> promptAuthorizedPremium(player);
+            case PRE_REGISTER -> promptPreRegisterPremium(player);
+            case BLOCKED -> send(player, Config.MSG_BLOCKED_ACTION.get());
+        }
+        return 1;
+    }
+
+    private static void promptAuthorizedPremium(ServerPlayer player) {
         PENDING_PREMIUM.put(player.getUUID(), System.currentTimeMillis());
         send(player, "§6§l⚠ Внимание!");
         send(player, "§eКоманда §f/premium §eпомечает ваш аккаунт как §aлицензионный§e.");
@@ -330,19 +375,46 @@ public final class AuthCommands {
                                 Component.literal("§7Нажмите, чтобы подтвердить"))));
         player.sendSystemMessage(Component.literal("§7Нажмите ").append(confirm)
                 .append(Component.literal(" §7или введите §f/premium confirm §7(60 секунд).")));
-        return 1;
+    }
+
+    private static void promptPreRegisterPremium(ServerPlayer player) {
+        send(player, "§6§l⚠ Внимание!");
+        send(player, "§eКоманда §f/premium §eзарегистрирует этот аккаунт как §aлицензионный§e — §aбез пароля§e.");
+        send(player, "§eПосле подтверждения сервер вас переподключит; заходите §aТОЛЬКО§e с лицензионного клиента Mojang.");
+        send(player, "§cЕсли вы НЕ владелец лицензии этого ника — используйте §f/register§c, а не §f/premium§c.");
+        MutableComponent confirm = Component.literal("§a§l[ Подтвердить ]")
+                .withStyle(s -> s
+                        .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/premium confirm"))
+                        .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                                Component.literal("§7Нажмите, чтобы подтвердить"))));
+        player.sendSystemMessage(Component.literal("§7Нажмите ").append(confirm)
+                .append(Component.literal(" §7или введите §f/premium confirm §7(60 секунд).")));
+        PENDING_PREMIUM.put(player.getUUID(), System.currentTimeMillis());
     }
 
     private static int handlePremiumSelfConfirm(CommandContext<CommandSourceStack> ctx,
                                                 DatabaseManager db, AuthSessionManager sessions) {
         ServerPlayer player = sourcePlayer(ctx);
         if (player == null) return 0;
-        if (!requireAuthorized(player, sessions)) return 0;
+
+        // Re-derive the mode fresh (not whatever the prompt saw) — state may have moved on since.
+        PremiumMode mode = premiumMode(player, sessions);
+        if (mode == PremiumMode.BLOCKED) {
+            send(player, Config.MSG_BLOCKED_ACTION.get());
+            return 0;
+        }
         if (!consumePending(PENDING_PREMIUM, player.getUUID())) {
             send(player, "§eСначала введите §f/premium§e, чтобы запросить подтверждение.");
             return 0;
         }
 
+        if (mode == PremiumMode.PRE_REGISTER) {
+            return confirmPreRegisterPremium(player, db, sessions);
+        }
+        return confirmAuthorizedPremium(player, db);
+    }
+
+    private static int confirmAuthorizedPremium(ServerPlayer player, DatabaseManager db) {
         String username = player.getGameProfile().getName();
         db.findByName(username).thenAccept(opt -> player.server.execute(() -> {
             if (opt.isEmpty()) {
@@ -367,6 +439,53 @@ public final class AuthCommands {
                           "§a§lЛицензионный режим включён.\n\n" +
                           "§fЗайдите заново с §aлицензионного§f клиента Mojang —\n" +
                           "§fвход произойдёт автоматически, пароль не нужен."));
+              }));
+        }));
+        return 1;
+    }
+
+    /**
+     * Registers a brand-new name directly as premium, skipping the password step entirely. Only
+     * reachable via {@link PremiumMode#PRE_REGISTER} — {@code premiumMode()} already guarantees the
+     * session has no DB row and the feature is enabled in config; this method re-checks the DB
+     * itself right before writing, because the session's cached "not registered" flag can go stale
+     * (someone else may have registered this exact name in the meantime).
+     *
+     * <p>Rules must be accepted first — same requirement as plain /register — so a licensed player
+     * cannot use this shortcut to skip reading them; the newly written row therefore always carries
+     * {@code rules_accepted = true} and the following premium login goes straight to the game.
+     */
+    private static int confirmPreRegisterPremium(ServerPlayer player, DatabaseManager db,
+                                                  AuthSessionManager sessions) {
+        AuthSession session = sessions.get(player.getUUID()).orElse(null);
+        if (session == null) return 0;
+        if (!session.isRulesAccepted()) {
+            send(player, "§cСначала ознакомьтесь с правилами §f(/rules)§c и введите §f/acceptrules§c.");
+            return 0;
+        }
+
+        String username = player.getGameProfile().getName();
+        String ip = player.getIpAddress();
+        db.findByName(username).thenAccept(opt -> player.server.execute(() -> {
+            if (!sessions.get(player.getUUID()).map(s -> s == session).orElse(false)) return;
+            if (opt.isPresent()) {
+                // Lost the race: someone registered this name (cracked or premium) while we waited.
+                send(player, "§cЭтот никнейм уже зарегистрирован. Используйте §f/login§c.");
+                session.setRegistered(true);
+                return;
+            }
+            db.register(player.getUUID(), username, "premium:" + player.getUUID(), true, ip, true)
+              .whenComplete((v, err) -> player.server.execute(() -> {
+                  if (err != null) {
+                      ru.goidacraft.goidaauth.GoidaAuth.LOGGER.error("pre-register premium failed for {}", username, err);
+                      send(player, "§cОшибка записи в БД. Попробуйте снова.");
+                      return;
+                  }
+                  ru.goidacraft.goidaauth.GoidaAuth.LOGGER.info("{} pre-registered as premium", username);
+                  player.connection.disconnect(Component.literal(
+                          "§a§lВаш аккаунт помечен как лицензионный.\n\n" +
+                          "§fЗайдите заново с §aлицензионного§f клиента Mojang —\n" +
+                          "§fвход произойдёт автоматически, пароль не понадобится."));
               }));
         }));
         return 1;
@@ -1137,7 +1256,8 @@ public final class AuthCommands {
             return 0;
         }
         if (session.isRulesAccepted()) {
-            send(player, "§eВы уже приняли правила. " + Config.MSG_REGISTER_PROMPT.get());
+            send(player, "§eВы уже приняли правила.");
+            sendRegisterPrompt(player, !session.isRegistered());
             return 0;
         }
 
@@ -1152,7 +1272,9 @@ public final class AuthCommands {
             ru.goidacraft.goidaauth.events.AuthEventHandler.onAuthorized(player, session);
             send(player, "§aДобро пожаловать! Приятной игры.");
         } else {
-            send(player, Config.MSG_REGISTER_PROMPT.get());
+            // Only reachable for a brand-new, still-unregistered name (see resolveIdentity/promptRules),
+            // so the /premium hint is always safe here.
+            sendRegisterPrompt(player, true);
         }
         return 1;
     }
